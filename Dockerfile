@@ -31,6 +31,5 @@ USER mcp
 # Expose the default MCP server port
 EXPOSE 8000
 
-# Default command - run with SSE transport for Docker deployments
+# Default command - run with Streamable HTTP transport for Docker deployments
 CMD ["python", "src/mcp/server.py", "--transport", "streamable-http"]
-

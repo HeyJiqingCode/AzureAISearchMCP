@@ -39,7 +39,9 @@ AZURE_SEARCH_ENDPOINT=https://your-search-service.search.windows.net
 AZURE_SEARCH_QUERY_KEY=your-query-key
 AZURE_SEARCH_ADMIN_KEY=your-admin-key   # required for agentic_retrieval
 
-# Timeout (Optional)
+# Server and timeout settings (Optional)
+# MCP_HOST=0.0.0.0
+# MCP_PORT=8000
 # AZURE_SEARCH_TIMEOUT=120
 ```
 
@@ -49,13 +51,15 @@ AZURE_SEARCH_ADMIN_KEY=your-admin-key   # required for agentic_retrieval
 python src/mcp/server.py
 
 # For SSE transport
-python src/mcp/server.py --transport sse
+python src/mcp/server.py --transport sse --host 0.0.0.0 --port 8000
 
-# For streamable-http transport  
-python src/mcp/server.py --transport streamable-http
+# For Streamable HTTP transport
+python src/mcp/server.py --transport streamable-http --host 0.0.0.0 --port 8000
 ```
 
-**5/ Add MCP Server to your client**
+The server can start without `AZURE_SEARCH_ENDPOINT` if your MCP client passes `endpoint` in each tool call.
+
+**5/ Add MCP Server to your client for Streamable HTTP**
 ```json
 {
   "mcpServers": {
@@ -90,6 +94,8 @@ docker run -itd -p 8000:8000 --name AzureAISearch \
   -e AZURE_SEARCH_ENDPOINT=https://your-search-service.search.windows.net \
   -e AZURE_SEARCH_QUERY_KEY=your-query-key \
   -e AZURE_SEARCH_ADMIN_KEY=your-admin-key \
+  -e MCP_HOST=0.0.0.0 \
+  -e MCP_PORT=8000 \
   azure-ai-search-mcp:2.0.0
 ```
 

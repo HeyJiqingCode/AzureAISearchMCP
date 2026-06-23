@@ -69,6 +69,8 @@ AGENTIC_HTTP_TIMEOUT_SECONDS: Final[int] = int(
     os.getenv("AZURE_SEARCH_AGENTIC_TIMEOUT", os.getenv("AZURE_SEARCH_TIMEOUT", "90"))
 )
 AGENTIC_TIMEOUT_BUFFER_SECONDS: Final[int] = int(os.getenv("AZURE_SEARCH_AGENTIC_TIMEOUT_BUFFER", "30"))
+DEFAULT_MCP_HOST: Final[str] = os.getenv("MCP_HOST", "0.0.0.0")
+DEFAULT_MCP_PORT: Final[int] = int(os.getenv("MCP_PORT", "8000"))
 
 
 def _resolve_endpoint(endpoint: Optional[str] = None) -> str:
@@ -102,6 +104,17 @@ async def _maybe_await(result: Any) -> Any:
     if asyncio.iscoroutine(result):
         return await result
     return result
+
+
+# 从 Azure SDK 异常中提取 HTTP 状态码，避免不同异常形态输出 None。
+def _http_status_code(exc: HttpResponseError) -> Any:
+    status_code = getattr(exc, "status_code", None)
+    if status_code is not None:
+        return status_code
+    response = getattr(exc, "response", None)
+    if response is None:
+        return "unknown"
+    return getattr(response, "status_code", None) or getattr(response, "status", "unknown")
 
 
 # 将 SDK 模型和嵌套容器转换为 MCP 可返回的基础类型。
@@ -186,6 +199,7 @@ def _serialize_facets(raw: Any) -> Optional[Dict[str, Any]]:
     return str(raw) if raw else None
 
 
+# 汇总 Azure Search 分页结果，并尽量保留 count、answer、facet 等附加元数据。
 async def _collect_results(result_iterator: Any) -> Dict[str, Any]:
     items: List[Dict[str, Any]] = []
     async for item in result_iterator:  # each item is SearchResult (Mapping)
@@ -200,7 +214,8 @@ async def _collect_results(result_iterator: Any) -> Dict[str, Any]:
         if hasattr(result_iterator, attr):
             try:
                 raw = await _maybe_await(getattr(result_iterator, attr)())
-            except Exception:  # pragma: no cover - defensive
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning("Failed to read Azure Search result metadata via %s: %s", attr, exc)
                 continue
             if not raw:
                 continue
@@ -233,7 +248,8 @@ async def _collect_results(result_iterator: Any) -> Dict[str, Any]:
     if hasattr(result_iterator, "get_continuation_token"):
         try:
             continuation_token = result_iterator.get_continuation_token()
-        except Exception:  # pragma: no cover - defensive
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("Failed to read Azure Search continuation token: %s", exc)
             continuation_token = None
 
     # Build response dict, only include non-None values
@@ -267,6 +283,7 @@ async def _create_search_client(
     return client
 
 
+# 执行统一的 SearchClient 查询，并为客户排障补充索引和查询上下文。
 async def _execute_search(
     *,
     endpoint: str,
@@ -277,13 +294,21 @@ async def _execute_search(
 ) -> Dict[str, Any]:
     credential = AzureKeyCredential(key)
     client = await _create_search_client(endpoint=endpoint, index_name=index_name, credential=credential)
-    async with client:
-        result_pager = await client.search(
-            search_text=search_text,
-            **search_kwargs,
-            timeout=HTTP_TIMEOUT_SECONDS,
-        )
-        payload = await _collect_results(result_pager)
+    try:
+        async with client:
+            result_pager = await client.search(
+                search_text=search_text,
+                **search_kwargs,
+                timeout=HTTP_TIMEOUT_SECONDS,
+            )
+            payload = await _collect_results(result_pager)
+    except HttpResponseError as exc:
+        query_label = search_text if search_text is not None else "<vector-only>"
+        status_code = _http_status_code(exc)
+        raise RuntimeError(
+            "Azure AI Search query failed "
+            f"(index={index_name}, query={query_label}, status={status_code}): {exc.message}"
+        ) from exc
     return payload
 
 
@@ -1129,7 +1154,7 @@ async def agentic_retrieval(
         formatted_data["request"] = request.as_dict()
         return formatted_data
     except HttpResponseError as exc:
-        raise RuntimeError(f"Agentic retrieval failed ({exc.status_code}): {exc.message}") from exc
+        raise RuntimeError(f"Agentic retrieval failed ({_http_status_code(exc)}): {exc.message}") from exc
     except asyncio.TimeoutError as exc:
         raise RuntimeError(
             "Agentic retrieval timed out while waiting for Azure AI Search to respond. "
@@ -1139,6 +1164,7 @@ async def agentic_retrieval(
         ) from exc
 
 
+# 解析 MCP 启动参数，让本地 stdio 和远程 HTTP 部署使用同一个入口。
 def main() -> None:
     global AZURE_SEARCH_ENDPOINT
     parser = ArgumentParser(description="Start the Azure AI Search MCP server")
@@ -1146,25 +1172,53 @@ def main() -> None:
         "--transport",
         required=False,
         default="stdio",
-        choices=("stdio", "sse", "streamable-http"),
+        choices=("stdio", "http", "streamable-http", "sse"),
         help="Transport protocol (default: stdio)",
+    )
+    parser.add_argument(
+        "--host",
+        required=False,
+        default=DEFAULT_MCP_HOST,
+        help="Host for HTTP/SSE transports (default: MCP_HOST or 0.0.0.0)",
+    )
+    parser.add_argument(
+        "--port",
+        required=False,
+        default=DEFAULT_MCP_PORT,
+        type=int,
+        help="Port for HTTP/SSE transports (default: MCP_PORT or 8000)",
     )
     parser.add_argument(
         "--endpoint",
         required=False,
-        default=AZURE_SEARCH_ENDPOINT,
-        help="Override the Azure AI Search endpoint",
+        default=None,
+        help="Set a default Azure AI Search endpoint for this server process",
     )
     args = parser.parse_args()
 
-    logger.info("Starting Azure AI Search MCP server with transport=%s", args.transport)
-    resolved_endpoint = _resolve_endpoint(args.endpoint)
-    if resolved_endpoint != AZURE_SEARCH_ENDPOINT:
+    if args.endpoint:
+        resolved_endpoint = _resolve_endpoint(args.endpoint)
         os.environ["AZURE_SEARCH_ENDPOINT"] = resolved_endpoint
         AZURE_SEARCH_ENDPOINT = resolved_endpoint
-    logger.info("Azure Search endpoint resolved to %s", resolved_endpoint)
+        logger.info("Azure Search endpoint resolved to %s", resolved_endpoint)
+    elif AZURE_SEARCH_ENDPOINT:
+        logger.info("Azure Search endpoint resolved to %s", _resolve_endpoint(AZURE_SEARCH_ENDPOINT))
+    else:
+        logger.warning(
+            "Azure Search endpoint is not configured. The server can start, "
+            "but each tool call must pass endpoint or set AZURE_SEARCH_ENDPOINT."
+        )
 
-    mcp.run(transport="http", host="0.0.0.0", port=8000)
+    transport_kwargs: Dict[str, Any] = {}
+    if args.transport != "stdio":
+        transport_kwargs = {"host": args.host, "port": args.port}
+
+    logger.info(
+        "Starting Azure AI Search MCP server with transport=%s%s",
+        args.transport,
+        f" on {args.host}:{args.port}" if transport_kwargs else "",
+    )
+    mcp.run(transport=args.transport, **transport_kwargs)
 
 
 if __name__ == "__main__":
