@@ -61,10 +61,13 @@ python src/mcp/server.py --transport streamable-http --host 0.0.0.0 --port 8000
 
 Set `AZURE_SEARCH_ENDPOINT` in the environment or pass `--endpoint` when starting the server.
 
-`AZURE_SEARCH_TIMEOUT` is the default client-side SDK timeout for standard search tools.
-`AZURE_SEARCH_AGENTIC_TIMEOUT` is the client-side safety budget for `agentic_retrieval`.
-When a request sets `max_runtime_seconds`, the server uses the larger value of
-`AZURE_SEARCH_AGENTIC_TIMEOUT` and `max_runtime_seconds + AZURE_SEARCH_AGENTIC_TIMEOUT_BUFFER`.
+Timeout settings are split into two layers:
+
+- `max_runtime_seconds` is a tool argument for `agentic_retrieval`. It asks Azure AI Search to stop the Knowledge Base retrieve operation after that many seconds.
+- `AZURE_SEARCH_AGENTIC_TIMEOUT` is how long this MCP server is willing to wait for Azure AI Search to respond.
+- `AZURE_SEARCH_AGENTIC_TIMEOUT_BUFFER` adds extra waiting time when `max_runtime_seconds` is set.
+
+Example: if `max_runtime_seconds=60` and `AZURE_SEARCH_AGENTIC_TIMEOUT_BUFFER=30`, this MCP server waits up to 90 seconds. This gives Azure AI Search 60 seconds to run, plus 30 seconds for network and response overhead.
 
 **5/ Add MCP Server to your client for Streamable HTTP**
 ```json
@@ -284,7 +287,13 @@ Run Azure AI Search Knowledge Base retrieval through the Python SDK preview clie
 
 `answerSynthesis` requires message-based retrieval (`low` or `medium`). Use `reasoning_effort="minimal"` with `output_mode="extractedData"` for direct semantic intent retrieval.
 
-`max_runtime_seconds` maps to Azure AI Search `maxRuntimeInSeconds`, which caps service-side processing latency for the retrieve request. The `AZURE_SEARCH_AGENTIC_TIMEOUT` and `AZURE_SEARCH_AGENTIC_TIMEOUT_BUFFER` environment variables are still useful as MCP client-side guards for SDK transport delays, retries, network stalls, or unexpectedly long responses.
+Timeouts use two layers:
+
+- `max_runtime_seconds`: per-call Azure AI Search limit. Use this when the caller wants to cap how long Knowledge Base retrieval may run in Azure.
+- `AZURE_SEARCH_AGENTIC_TIMEOUT`: server-wide MCP wait limit. Use this as a safety guard so this MCP server does not wait forever.
+- `AZURE_SEARCH_AGENTIC_TIMEOUT_BUFFER`: extra wait time added on top of `max_runtime_seconds`.
+
+Recommended starting point: leave `AZURE_SEARCH_AGENTIC_TIMEOUT=90` and `AZURE_SEARCH_AGENTIC_TIMEOUT_BUFFER=30`. For slower answer synthesis or multi-source retrieval, pass `max_runtime_seconds` on the tool call and increase the env values only if the MCP server still times out first.
 
 **Knowledge Source Configuration:**
 
