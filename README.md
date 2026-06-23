@@ -1,6 +1,6 @@
 # Azure AI Search MCP Server
 
-A Model Context Protocol (MCP) server that exposes Azure AI Search capabilities across multiple retrieval modes (keyword, semantic, vector, hybrid, plus the new agentic retrieval preview APIs).
+A Model Context Protocol (MCP) server that exposes Azure AI Search capabilities across multiple retrieval modes (keyword, semantic, vector, hybrid, plus Knowledge Base retrieval through the latest Python SDK preview APIs).
 
 ## Features
 - Execute keyword searches using simple syntax.
@@ -8,7 +8,8 @@ A Model Context Protocol (MCP) server that exposes Azure AI Search capabilities 
 - Perform pure vector similarity search.
 - Combine keyword and vector retrieval (hybrid search).
 - Apply semantic reranking on hybrid results for richer answers.
-- Call Azure AI Search agentic retrieval (knowledge base multi-query pipeline, REST `2025-11-01-preview`).
+- Call Azure AI Search Knowledge Base retrieval with `azure-search-documents` 12.1 preview SDK support.
+- Tune modern vector and hybrid retrieval settings such as oversampling, vector filter mode, filter overrides, semantic debug, and `hybridSearch.maxTextRecallSize`.
 - Support integrated vectorization when your index has an attached vectorizer (no manual embeddings required).
 - Tools read `AZURE_SEARCH_ENDPOINT` and key env vars at runtime. Traditional search tools fall back to `AZURE_SEARCH_QUERY_KEY`, while the agentic tool falls back to `AZURE_SEARCH_ADMIN_KEY`. Pass `endpoint`/`api_key` parameters only when you need to override per-call.
 
@@ -18,12 +19,12 @@ A Model Context Protocol (MCP) server that exposes Azure AI Search capabilities 
 
 **1/ Clone Repo**
 ```bash
-git clone https://github.com/HeyJiqingCode/mcp.git
+git clone https://github.com/HeyJiqingCode/AzureAISearchMCP.git
+cd AzureAISearchMCP
 ```
 
 **2/ Install dependencies**:
 ```bash
-cd mcp/ai-search/
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
@@ -58,7 +59,7 @@ python src/mcp/server.py --transport streamable-http
 ```json
 {
   "mcpServers": {
-    "AIFoundryAgent": {
+    "AzureAISearch": {
       "type": "streamableHttp",
       "url": "http://127.0.0.1:8000/mcp",
       "headers": {
@@ -74,13 +75,13 @@ python src/mcp/server.py --transport streamable-http
 
 **1/ Clone Repo**
 ```bash
-git clone https://github.com/HeyJiqingCode/mcp.git
+git clone https://github.com/HeyJiqingCode/AzureAISearchMCP.git
+cd AzureAISearchMCP
 ```
 
 **2/ Build Docker Image**
 ```bash
-cd mcp/ai-search/
-docker build -t azure-ai-search-mcp:1.1.0 -f Dockerfile .
+docker build -t azure-ai-search-mcp:2.0.0 -f Dockerfile .
 ```
 
 **3/ Run the container**:
@@ -89,14 +90,14 @@ docker run -itd -p 8000:8000 --name AzureAISearch \
   -e AZURE_SEARCH_ENDPOINT=https://your-search-service.search.windows.net \
   -e AZURE_SEARCH_QUERY_KEY=your-query-key \
   -e AZURE_SEARCH_ADMIN_KEY=your-admin-key \
-  azure-ai-search-mcp:1.1.0
+  azure-ai-search-mcp:2.0.0
 ```
 
 **4/ Add MCP Server for HTTP transport**
 ```json
 {
   "mcpServers": {
-    "AIFoundryAgent": {
+    "AzureAISearch": {
       "type": "streamableHttp",
       "url": "http://127.0.0.1:8000/mcp",
       "headers": {
@@ -120,7 +121,7 @@ Each tool accepts an optional `api_key` and `endpoint` so you can override defau
 
 Keyword (BM25) search over an index using simple query syntax, with optional filters and field selection.
 
-**Paremeters:**
+**Parameters:**
 
 index_name, query, top=5, skip=0, search_fields=None, select=None, filter=None, search_mode="any", api_key=None, endpoint=None
 
@@ -141,9 +142,9 @@ index_name, query, top=5, skip=0, search_fields=None, select=None, filter=None, 
 
 Semantic reranked search returning optional captions and answers when the index has semantic configuration enabled.
 
-**Paremeters:**
+**Parameters:**
 
-index_name, query, semantic_configuration, top=5, skip=0, captions="extractive", answers=None, select=None, filter=None, api_key=None, endpoint=None
+index_name, query, semantic_configuration, top=5, skip=0, select=None, filter=None, semantic_query=None, query_caption="extractive", query_caption_highlight_enabled=True, query_answer=None, semantic_error_mode=None, semantic_max_wait_in_milliseconds=None, debug=None, api_key=None, endpoint=None
 
 **Example Usage:**
 
@@ -163,9 +164,9 @@ index_name, query, semantic_configuration, top=5, skip=0, captions="extractive",
 
 Vector-only similarity search using integrated vectorization (text-to-embedding) over specified vector fields.
 
-**Paremeters:**
+**Parameters:**
 
-index_name, vector_fields, vector_text, k=10, exhaustive=False, weight=None, select=None, filter=None, api_key=None, endpoint=None
+index_name, vector_fields, vector_text, k=10, exhaustive=False, weight=None, oversampling=None, filter_override=None, vector_filter_mode=None, vector_similarity_threshold=None, search_score_threshold=None, select=None, filter=None, debug=None, api_key=None, endpoint=None
 
 **Example Usage:**
 
@@ -186,9 +187,9 @@ index_name, vector_fields, vector_text, k=10, exhaustive=False, weight=None, sel
 
 Hybrid (keyword + vector) search that fuses BM25 and vector similarity results using Reciprocal Rank Fusion.
 
-**Paremeters:**
+**Parameters:**
 
-index_name, query, vector_fields, vector_text, k=10, top=10, exhaustive=False, weight=None, select=None, filter=None, search_fields=None, api_key=None, endpoint=None
+index_name, query, vector_fields, vector_text, k=10, top=10, exhaustive=False, weight=None, oversampling=None, filter_override=None, vector_filter_mode=None, vector_similarity_threshold=None, search_score_threshold=None, max_text_recall_size=None, count_and_facet_mode=None, select=None, filter=None, search_fields=None, debug=None, api_key=None, endpoint=None
 
 **Example Usage:**
 
@@ -211,9 +212,9 @@ index_name, query, vector_fields, vector_text, k=10, top=10, exhaustive=False, w
 
 Hybrid (keyword + vector) search with semantic reranking, captions, and answers when configured.
 
-**Paremeters:**
+**Parameters:**
 
-index_name, query, vector_fields, semantic_configuration, vector_text, k=50, top=10, exhaustive=False, weight=None, captions="extractive", answers=None, select=None, filter=None, search_fields=None, api_key=None, endpoint=None
+index_name, query, vector_fields, semantic_configuration, vector_text, k=50, top=10, exhaustive=False, weight=None, oversampling=None, filter_override=None, vector_filter_mode=None, vector_similarity_threshold=None, search_score_threshold=None, max_text_recall_size=None, count_and_facet_mode=None, select=None, filter=None, search_fields=None, semantic_query=None, query_caption="extractive", query_caption_highlight_enabled=True, query_answer=None, semantic_error_mode=None, semantic_max_wait_in_milliseconds=None, debug=None, api_key=None, endpoint=None
 
 **Example Usage:**
 
@@ -236,19 +237,22 @@ index_name, query, vector_fields, semantic_configuration, vector_text, k=50, top
 
 ### `agentic_retrieval`
 
-Run the Azure AI Search agentic retrieval pipeline (knowledge base multi-query orchestration, preview). Requires `AZURE_SEARCH_ADMIN_KEY` or an admin key passed via `api_key`.
+Run Azure AI Search Knowledge Base retrieval through the Python SDK preview client. Requires `AZURE_SEARCH_ADMIN_KEY` or an admin key passed via `api_key`.
 
 **Parameters (frequently used):**
 
 - `knowledge_base_name` (str, required)
 - `query` (str, required)
-- `intent_query` (Optional[str])
-- `reasoning_effort` (Optional[str]) – `minimal`, `low`, or `medium`
-- `output_mode` (str) – `answerSynthesis` or `extractiveData`
+- `intent_query` (Optional[str]) – direct semantic intent; this uses intent-based retrieval
+- `reasoning_effort` (str) – `minimal`, `low`, or `medium`; default is `low`
+- `output_mode` (str) – `answerSynthesis` or `extractedData`; default is `answerSynthesis`
 - `include_activity` (bool)
-- `max_runtime_seconds`, `max_output_size` (Optional[int])
+- `max_runtime_seconds`, `max_output_size`, `max_output_documents` (Optional[int])
 - `knowledge_source_configs` (Optional[str]) – Key-value format for configuring knowledge sources. Format: `"knowledgeSourceName=name, kind=type, param=value; knowledgeSourceName=name2, ..."`. Each source can be independently configured with type-specific parameters.
+- `query_source_authorization` (Optional[str]) – end-user token for query-time permission enforcement
 - `api_key`, `endpoint`
+
+`answerSynthesis` requires message-based retrieval (`low` or `medium`). Use `reasoning_effort="minimal"` with `output_mode="extractedData"` for direct semantic intent retrieval.
 
 **Knowledge Source Configuration:**
 
@@ -256,20 +260,19 @@ Use `knowledge_source_configs` to specify one or more knowledge sources with per
 
 **Supported Parameters by Source Type:**
 
-| Parameter | Type | searchIndex | web | remoteSharePoint | Description |
-|-----------|------|-------------|-----|------------------|-------------|
-| `knowledgeSourceName` | string | ✅ Required | ✅ Required | ✅ Required | Knowledge source name |
-| `kind` | string | ✅ Required | ✅ Required | ✅ Required | Source type |
-| `includeReferences` | bool | ✅ | ✅ | ✅ | Include document references |
-| `alwaysQuerySource` | bool | ✅ | ✅ | ✅ | Force querying even if not needed |
-| `rerankerThreshold` | float | ✅ | ✅ | ✅ | Minimum reranker score threshold |
-| `includeReferenceSourceData` | bool | ✅ | ✅ | ✅ | Include source data in references |
-| `filterAddOn` | string | ✅ | ❌ | ❌ | OData filter expression |
-| `count` | int | ❌ | ✅ | ❌ | Number of results |
-| `freshness` | string | ❌ | ✅ | ❌ | Result freshness (day/week/month) |
-| `language` | string | ❌ | ✅ | ❌ | Result language (e.g., zh-CN) |
-| `market` | string | ❌ | ✅ | ❌ | Result market (e.g., zh-CN) |
-| `filterExpressionAddOn` | string | ❌ | ❌ | ✅ | KQL filter expression |
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `knowledgeSourceName` | string | Knowledge source name |
+| `kind` | string | Source type, such as `searchIndex`, `web`, `azureBlob`, `indexedOneLake`, or preview kinds supported by the SDK |
+| `includeReferences` | bool | Include document references |
+| `includeReferenceSourceData` | bool | Include source data in references |
+| `rerankerThreshold` | float | Minimum reranker score threshold |
+| `alwaysQuerySource` | bool | Force querying when supported by the selected source kind |
+| `failOnError` | bool | Treat this source as required |
+| `maxOutputDocuments` | int | Cap candidate documents from this source |
+| `filterAddOn` | string | Runtime OData filter for search index knowledge sources |
+| `count`, `freshness`, `language`, `market` | mixed | Web source controls |
+| `filterExpressionAddOn` | string | KQL filter expression for SharePoint-style sources |
 
 **Format Rules:**
 - Parameters can be specified in **any order**
@@ -294,6 +297,21 @@ Use `knowledge_source_configs` to specify one or more knowledge sources with per
 }
 ```
 
+**Minimal intent example:**
+
+```json
+{
+  "tool": "agentic_retrieval",
+  "arguments": {
+    "knowledge_base_name": "kb-support",
+    "query": "How do I reset my VPN password?",
+    "reasoning_effort": "minimal",
+    "output_mode": "extractedData",
+    "knowledge_source_configs": "knowledgeSourceName=ks-docs, kind=searchIndex, includeReferences=true"
+  }
+}
+```
+
 **Multiple sources example:**
 
 ```json
@@ -307,7 +325,7 @@ Use `knowledge_source_configs` to specify one or more knowledge sources with per
 }
 ```
 
-Response mirrors the REST contract (`response`, `references`, `activity`, `_status_code`). See [Knowledge Retrieval - Retrieve](https://learn.microsoft.com/en-us/rest/api/searchservice/knowledge-retrieval/retrieve?view=rest-searchservice-2025-11-01-preview) for schema details.
+Response includes a convenience `answer`, formatted `references`, the SDK response fields (`response`, `activity`, `raw_references`, `metadata`), and the normalized SDK request body used for the call.
 
 ## More Details
 

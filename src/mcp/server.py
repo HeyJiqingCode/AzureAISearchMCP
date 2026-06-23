@@ -1,18 +1,31 @@
 import asyncio
 import io
-import json
 import logging
 import os
 import re
 import sys
 from argparse import ArgumentParser
 from typing import Any, Dict, Final, List, Optional
-from urllib.parse import quote
 
-import aiohttp
+from azure.core.exceptions import HttpResponseError
 from azure.core.credentials import AzureKeyCredential
 from azure.search.documents.aio import SearchClient
-from azure.search.documents.models import VectorizableTextQuery
+from azure.search.documents.knowledgebases.aio import KnowledgeBaseRetrievalClient
+from azure.search.documents.knowledgebases.models import (
+    KnowledgeBaseMessage,
+    KnowledgeBaseMessageTextContent,
+    KnowledgeBaseRetrievalRequest,
+    KnowledgeRetrievalLowReasoningEffort,
+    KnowledgeRetrievalMediumReasoningEffort,
+    KnowledgeRetrievalMinimalReasoningEffort,
+    KnowledgeRetrievalSemanticIntent,
+)
+from azure.search.documents.models import (
+    HybridSearch,
+    SearchScoreThreshold,
+    VectorizableTextQuery,
+    VectorSimilarityThreshold,
+)
 from dotenv import load_dotenv
 from fastmcp import FastMCP
 
@@ -56,7 +69,6 @@ AGENTIC_HTTP_TIMEOUT_SECONDS: Final[int] = int(
     os.getenv("AZURE_SEARCH_AGENTIC_TIMEOUT", os.getenv("AZURE_SEARCH_TIMEOUT", "90"))
 )
 AGENTIC_TIMEOUT_BUFFER_SECONDS: Final[int] = int(os.getenv("AZURE_SEARCH_AGENTIC_TIMEOUT_BUFFER", "30"))
-AGENTIC_API_VERSION: Final[str] = "2025-11-01-preview"
 
 
 def _resolve_endpoint(endpoint: Optional[str] = None) -> str:
@@ -92,6 +104,24 @@ async def _maybe_await(result: Any) -> Any:
     return result
 
 
+# 将 SDK 模型和嵌套容器转换为 MCP 可返回的基础类型。
+def _to_plain_data(value: Any) -> Any:
+    if hasattr(value, "as_dict"):
+        return _to_plain_data(value.as_dict())
+    if hasattr(value, "isoformat"):
+        try:
+            return value.isoformat()
+        except Exception:  # pragma: no cover - defensive fallback
+            return str(value)
+    if isinstance(value, dict):
+        return {key: _to_plain_data(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_to_plain_data(item) for item in value]
+    if isinstance(value, (str, int, float, bool, type(None))):
+        return value
+    return str(value)
+
+
 def _build_messages_from_query(query: str) -> List[Dict[str, Any]]:
     return [
         {
@@ -113,7 +143,7 @@ def _build_agentic_timeout_budget(max_runtime_seconds: Optional[int]) -> int:
         max_runtime_seconds: 请求体中的服务端最大运行时长；为 None 时表示未显式限制。
 
     返回:
-        int: 供 aiohttp 使用的总超时秒数，包含服务端运行时间和额外缓冲。
+        int: 供 SDK 调用使用的总超时秒数，包含服务端运行时间和额外缓冲。
     """
     requested_runtime_seconds: int = max_runtime_seconds or 0
     buffered_runtime_seconds: int = requested_runtime_seconds + AGENTIC_TIMEOUT_BUFFER_SECONDS
@@ -121,45 +151,7 @@ def _build_agentic_timeout_budget(max_runtime_seconds: Optional[int]) -> int:
 
 
 def _normalize_document(document: Dict[str, Any]) -> Dict[str, Any]:
-    def _default(obj: Any) -> Any:
-        # Handle datetime objects
-        if hasattr(obj, "isoformat"):
-            try:
-                return obj.isoformat()
-            except Exception:  # pragma: no cover - fallback path
-                return str(obj)
-        # Handle objects with as_dict method
-        if hasattr(obj, "as_dict"):
-            try:
-                result = obj.as_dict()
-                # Recursively normalize the dict result
-                if isinstance(result, dict):
-                    return {k: _default(v) for k, v in result.items()}
-                return result
-            except Exception:  # pragma: no cover - fallback path
-                return str(obj)
-        # Handle objects with __dict__
-        if hasattr(obj, "__dict__") and obj.__dict__:
-            try:
-                return {key: _default(value) for key, value in obj.__dict__.items() if not key.startswith("_")}
-            except Exception:  # pragma: no cover
-                return str(obj)
-        # Handle basic types
-        if isinstance(obj, (str, int, float, bool, type(None))):
-            return obj
-        # Handle lists
-        if isinstance(obj, list):
-            return [_default(item) for item in obj]
-        # Handle dicts
-        if isinstance(obj, dict):
-            return {k: _default(v) for k, v in obj.items()}
-        # Fallback: convert to string
-        return str(obj)
-
-    serialized: Dict[str, Any] = {}
-    for key, value in document.items():
-        serialized[key] = _default(value)
-    return serialized
+    return _to_plain_data(document)
 
 
 def _serialize_highlights(value: Any) -> Optional[str]:
@@ -302,9 +294,16 @@ def _build_vector_query(
     k: int,
     exhaustive: bool,
     weight: Optional[float] = None,
+    oversampling: Optional[float] = None,
+    filter_override: Optional[str] = None,
+    vector_similarity_threshold: Optional[float] = None,
+    search_score_threshold: Optional[float] = None,
 ) -> List[VectorizableTextQuery]:
     if vector_fields is None:
         raise ValueError("vector_fields must be provided for vector-enabled search.")
+    if vector_similarity_threshold is not None and search_score_threshold is not None:
+        raise ValueError("Only one of vector_similarity_threshold or search_score_threshold can be provided.")
+
     vector_query = VectorizableTextQuery(
         text=vector_text,
         fields=vector_fields,
@@ -313,44 +312,60 @@ def _build_vector_query(
     )
     if weight is not None:
         vector_query.weight = weight
+    if oversampling is not None:
+        vector_query.oversampling = oversampling
+    if filter_override:
+        vector_query.filter_override = filter_override
+    if vector_similarity_threshold is not None:
+        vector_query.threshold = VectorSimilarityThreshold(value=vector_similarity_threshold)
+    if search_score_threshold is not None:
+        vector_query.threshold = SearchScoreThreshold(value=search_score_threshold)
     return [vector_query]
 
+
+# 构造 hybridSearch 请求对象，未设置时不向服务端发送该配置。
+def _build_hybrid_search(
+    *,
+    max_text_recall_size: Optional[int],
+    count_and_facet_mode: Optional[str],
+) -> Optional[HybridSearch]:
+    if max_text_recall_size is None and not count_and_facet_mode:
+        return None
+    return HybridSearch(
+        max_text_recall_size=max_text_recall_size,
+        count_and_facet_mode=count_and_facet_mode,
+    )
+
+
+# 根据工具参数选择 Knowledge Base retrieval 的推理强度模型。
+def _build_reasoning_effort(reasoning_effort: Optional[str]) -> Optional[Any]:
+    if not reasoning_effort:
+        return None
+
+    effort_kind = reasoning_effort.lower()
+    if effort_kind == "minimal":
+        return KnowledgeRetrievalMinimalReasoningEffort()
+    if effort_kind == "low":
+        return KnowledgeRetrievalLowReasoningEffort()
+    if effort_kind == "medium":
+        return KnowledgeRetrievalMediumReasoningEffort()
+    raise ValueError("reasoning_effort must be one of: minimal, low, medium")
+
+
 def _format_agentic_response(raw_response: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Format Agentic Retrieval API response for better readability.
-
-    Transforms:
-    - [ref_id:0] -> <sup>1</sup> (0-based to 1-based)
-    - Web references -> "1. [Web] [title](url)"
-    - KB references -> "1. [KnowledgeBase: source-name] [rerankerScore: X.XX] Title: XXX"
-
-    Args:
-        raw_response: Raw API response from Azure AI Search
-
-    Returns:
-        Formatted response with answer and references
-    """
-    result: Dict[str, Any] = {
-        "answer": "",
-        "references": []
-    }
-
-    # Extract answer text
+    """整理 Knowledge Base Retrieval 响应，同时保留原始结构。"""
     try:
         answer_text = raw_response["response"][0]["content"][0]["text"]
-    except (KeyError, IndexError):
+    except (KeyError, IndexError, TypeError):
         answer_text = ""
 
-    # Convert ref_id to superscript (0-based -> 1-based)
     def replace_ref(match):
         ref_id = int(match.group(1))
         superscript_num = ref_id + 1
         return f"<sup>{superscript_num}</sup>"
 
     formatted_answer = re.sub(r'\[ref_id:(\d+)\]', replace_ref, answer_text)
-    result["answer"] = formatted_answer
 
-    # Build activity ID to knowledge source name mapping
     activity_map = {}
     activities = raw_response.get("activity", [])
     for activity in activities:
@@ -359,7 +374,6 @@ def _format_agentic_response(raw_response: Dict[str, Any]) -> Dict[str, Any]:
         if activity_id is not None and knowledge_source_name:
             activity_map[activity_id] = knowledge_source_name
 
-    # Format references
     references = raw_response.get("references", [])
     formatted_refs = []
 
@@ -378,28 +392,36 @@ def _format_agentic_response(raw_response: Dict[str, Any]) -> Dict[str, Any]:
         knowledge_source_name = activity_map.get(activity_source, "Unknown")
 
         if ref_type == "web":
-            # Web type: N. [Web] [title](url)
             title = ref.get("title", "Untitled")
             url = ref.get("url", "")
             formatted_refs.append(f"{display_id}. [Web] [{title}]({url})")
 
-        elif ref_type in ["searchIndex", "remoteSharePoint"]:
-            # Knowledge Base type: N. [KnowledgeBase: source-name] [rerankerScore: X.XX] Title: XXX
+        elif ref_type in ["searchIndex", "remoteSharePoint", "azureBlob", "indexedOneLake"]:
             title = ref.get("title", "Untitled")
-            reranker_score = ref.get("rerankerScore", 0.0)
+            reranker_score = ref.get("rerankerScore")
+            score_text = f"{reranker_score:.2f}" if isinstance(reranker_score, (int, float)) else "n/a"
             formatted_refs.append(
-                f"{display_id}. [KnowledgeBase: {knowledge_source_name}] [rerankerScore: {reranker_score:.2f}] Title: {title}"
+                f"{display_id}. [KnowledgeBase: {knowledge_source_name}] [rerankerScore: {score_text}] Title: {title}"
             )
         else:
-            # Unknown type, use generic format
             formatted_refs.append(f"{display_id}. [Unknown Type: {ref_type}]")
 
-    # Sort references by display ID (numeric order)
-    formatted_refs.sort(key=lambda x: int(x.split('.')[0]))
+    def _reference_sort_key(value: str) -> int:
+        try:
+            return int(value.split(".", 1)[0])
+        except (ValueError, IndexError):
+            return 0
 
-    result["references"] = formatted_refs
+    formatted_refs.sort(key=_reference_sort_key)
 
-    return result
+    return {
+        "answer": formatted_answer,
+        "references": formatted_refs,
+        "response": raw_response.get("response", []),
+        "activity": raw_response.get("activity", []),
+        "raw_references": raw_response.get("references", []),
+        "metadata": raw_response.get("metadata", {}),
+    }
 
 @mcp.tool(
     name="simple_search",
@@ -492,10 +514,15 @@ async def semantic_search(
     filter: str = "",
     api_key: str = "",
     endpoint: str = "",
+    semantic_query: str = "",
     query_caption: str = "extractive",
+    query_caption_highlight_enabled: bool = True,
     query_answer: str = "",
     query_answer_count: int = 0,
     query_answer_threshold: float = 0.0,
+    semantic_error_mode: str = "",
+    semantic_max_wait_in_milliseconds: int = 0,
+    debug: str = "",
 ) -> Dict[str, Any]:
     """Execute semantic ranking against a configured index.
 
@@ -528,10 +555,16 @@ async def semantic_search(
     filter = None if filter == "" else filter
     api_key = None if api_key == "" else api_key
     endpoint = None if endpoint == "" else endpoint
+    semantic_query = None if semantic_query == "" else semantic_query
     # query_caption has default "extractive", don't convert to None
     query_answer = None if query_answer == "" else query_answer
     query_answer_count = None if query_answer_count == 0 else query_answer_count
     query_answer_threshold = None if query_answer_threshold == 0.0 else query_answer_threshold
+    semantic_error_mode = None if semantic_error_mode == "" else semantic_error_mode
+    semantic_max_wait_in_milliseconds = (
+        None if semantic_max_wait_in_milliseconds == 0 else semantic_max_wait_in_milliseconds
+    )
+    debug = None if debug == "" else debug
 
     resolved_endpoint = _resolve_endpoint(endpoint)
     key = _resolve_key(api_key)
@@ -548,14 +581,23 @@ async def semantic_search(
         search_kwargs["select"] = _comma_split(select)
     if filter:
         search_kwargs["filter"] = filter
+    if semantic_query:
+        search_kwargs["semantic_query"] = semantic_query
     if query_caption:
         search_kwargs["query_caption"] = query_caption
+        search_kwargs["query_caption_highlight_enabled"] = query_caption_highlight_enabled
     if query_answer:
         search_kwargs["query_answer"] = query_answer
         if query_answer_count is not None:
             search_kwargs["query_answer_count"] = query_answer_count
         if query_answer_threshold is not None:
             search_kwargs["query_answer_threshold"] = query_answer_threshold
+    if semantic_error_mode:
+        search_kwargs["semantic_error_mode"] = semantic_error_mode
+    if semantic_max_wait_in_milliseconds is not None:
+        search_kwargs["semantic_max_wait_in_milliseconds"] = semantic_max_wait_in_milliseconds
+    if debug:
+        search_kwargs["debug"] = debug
 
     return await _execute_search(
         endpoint=resolved_endpoint,
@@ -577,8 +619,14 @@ async def vector_search(
     k: int = 10,
     exhaustive: bool = False,
     weight: float = 0.0,
+    oversampling: float = 0.0,
+    filter_override: str = "",
+    vector_filter_mode: str = "",
+    vector_similarity_threshold: float = 0.0,
+    search_score_threshold: float = 0.0,
     select: str = "",
     filter: str = "",
+    debug: str = "",
     api_key: str = "",
     endpoint: str = "",
 ) -> Dict[str, Any]:
@@ -610,8 +658,14 @@ async def vector_search(
     """
     # Convert empty strings and sentinel values to None
     weight = None if weight == 0.0 else weight
+    oversampling = None if oversampling == 0.0 else oversampling
+    filter_override = None if filter_override == "" else filter_override
+    vector_filter_mode = None if vector_filter_mode == "" else vector_filter_mode
+    vector_similarity_threshold = None if vector_similarity_threshold == 0.0 else vector_similarity_threshold
+    search_score_threshold = None if search_score_threshold == 0.0 else search_score_threshold
     select = None if select == "" else select
     filter = None if filter == "" else filter
+    debug = None if debug == "" else debug
     api_key = None if api_key == "" else api_key
     endpoint = None if endpoint == "" else endpoint
 
@@ -624,6 +678,10 @@ async def vector_search(
         k=k,
         exhaustive=exhaustive,
         weight=weight,
+        oversampling=oversampling,
+        filter_override=filter_override,
+        vector_similarity_threshold=vector_similarity_threshold,
+        search_score_threshold=search_score_threshold,
     )
 
     search_kwargs: Dict[str, Any] = {
@@ -631,10 +689,14 @@ async def vector_search(
         "top": k,
         "include_total_count": True,
     }
+    if vector_filter_mode:
+        search_kwargs["vector_filter_mode"] = vector_filter_mode
     if select:
         search_kwargs["select"] = _comma_split(select)
     if filter:
         search_kwargs["filter"] = filter
+    if debug:
+        search_kwargs["debug"] = debug
 
     return await _execute_search(
         endpoint=resolved_endpoint,
@@ -658,9 +720,17 @@ async def hybrid_search(
     top: int = 10,
     exhaustive: bool = False,
     weight: float = 0.0,
+    oversampling: float = 0.0,
+    filter_override: str = "",
+    vector_filter_mode: str = "",
+    vector_similarity_threshold: float = 0.0,
+    search_score_threshold: float = 0.0,
+    max_text_recall_size: int = 0,
+    count_and_facet_mode: str = "",
     select: str = "",
     filter: str = "",
     search_fields: str = "",
+    debug: str = "",
     api_key: str = "",
     endpoint: str = "",
 ) -> Dict[str, Any]:
@@ -692,9 +762,17 @@ async def hybrid_search(
     """
     # Convert empty strings and sentinel values to None
     weight = None if weight == 0.0 else weight
+    oversampling = None if oversampling == 0.0 else oversampling
+    filter_override = None if filter_override == "" else filter_override
+    vector_filter_mode = None if vector_filter_mode == "" else vector_filter_mode
+    vector_similarity_threshold = None if vector_similarity_threshold == 0.0 else vector_similarity_threshold
+    search_score_threshold = None if search_score_threshold == 0.0 else search_score_threshold
+    max_text_recall_size = None if max_text_recall_size == 0 else max_text_recall_size
+    count_and_facet_mode = None if count_and_facet_mode == "" else count_and_facet_mode
     select = None if select == "" else select
     filter = None if filter == "" else filter
     search_fields = None if search_fields == "" else search_fields
+    debug = None if debug == "" else debug
     api_key = None if api_key == "" else api_key
     endpoint = None if endpoint == "" else endpoint
 
@@ -707,6 +785,14 @@ async def hybrid_search(
         k=k,
         exhaustive=exhaustive,
         weight=weight,
+        oversampling=oversampling,
+        filter_override=filter_override,
+        vector_similarity_threshold=vector_similarity_threshold,
+        search_score_threshold=search_score_threshold,
+    )
+    hybrid_search_config = _build_hybrid_search(
+        max_text_recall_size=max_text_recall_size,
+        count_and_facet_mode=count_and_facet_mode,
     )
 
     search_kwargs: Dict[str, Any] = {
@@ -714,12 +800,18 @@ async def hybrid_search(
         "top": top,
         "include_total_count": True,
     }
+    if hybrid_search_config:
+        search_kwargs["hybrid_search"] = hybrid_search_config
+    if vector_filter_mode:
+        search_kwargs["vector_filter_mode"] = vector_filter_mode
     if select:
         search_kwargs["select"] = _comma_split(select)
     if filter:
         search_kwargs["filter"] = filter
     if search_fields:
         search_kwargs["search_fields"] = _comma_split(search_fields)
+    if debug:
+        search_kwargs["debug"] = debug
 
     return await _execute_search(
         endpoint=resolved_endpoint,
@@ -744,13 +836,25 @@ async def semantic_hybrid_search(
     top: int = 10,
     exhaustive: bool = False,
     weight: float = 0.0,
+    oversampling: float = 0.0,
+    filter_override: str = "",
+    vector_filter_mode: str = "",
+    vector_similarity_threshold: float = 0.0,
+    search_score_threshold: float = 0.0,
+    max_text_recall_size: int = 0,
+    count_and_facet_mode: str = "",
     select: str = "",
     filter: str = "",
     search_fields: str = "",
+    semantic_query: str = "",
     query_caption: str = "extractive",
+    query_caption_highlight_enabled: bool = True,
     query_answer: str = "",
     query_answer_count: int = 0,
     query_answer_threshold: float = 0.0,
+    semantic_error_mode: str = "",
+    semantic_max_wait_in_milliseconds: int = 0,
+    debug: str = "",
     api_key: str = "",
     endpoint: str = "",
 ) -> Dict[str, Any]:
@@ -788,13 +892,26 @@ async def semantic_hybrid_search(
     """
     # Convert empty strings and sentinel values to None
     weight = None if weight == 0.0 else weight
+    oversampling = None if oversampling == 0.0 else oversampling
+    filter_override = None if filter_override == "" else filter_override
+    vector_filter_mode = None if vector_filter_mode == "" else vector_filter_mode
+    vector_similarity_threshold = None if vector_similarity_threshold == 0.0 else vector_similarity_threshold
+    search_score_threshold = None if search_score_threshold == 0.0 else search_score_threshold
+    max_text_recall_size = None if max_text_recall_size == 0 else max_text_recall_size
+    count_and_facet_mode = None if count_and_facet_mode == "" else count_and_facet_mode
     select = None if select == "" else select
     filter = None if filter == "" else filter
     search_fields = None if search_fields == "" else search_fields
+    semantic_query = None if semantic_query == "" else semantic_query
     # query_caption has default "extractive", don't convert
     query_answer = None if query_answer == "" else query_answer
     query_answer_count = None if query_answer_count == 0 else query_answer_count
     query_answer_threshold = None if query_answer_threshold == 0.0 else query_answer_threshold
+    semantic_error_mode = None if semantic_error_mode == "" else semantic_error_mode
+    semantic_max_wait_in_milliseconds = (
+        None if semantic_max_wait_in_milliseconds == 0 else semantic_max_wait_in_milliseconds
+    )
+    debug = None if debug == "" else debug
     api_key = None if api_key == "" else api_key
     endpoint = None if endpoint == "" else endpoint
 
@@ -807,6 +924,14 @@ async def semantic_hybrid_search(
         k=k,
         exhaustive=exhaustive,
         weight=weight,
+        oversampling=oversampling,
+        filter_override=filter_override,
+        vector_similarity_threshold=vector_similarity_threshold,
+        search_score_threshold=search_score_threshold,
+    )
+    hybrid_search_config = _build_hybrid_search(
+        max_text_recall_size=max_text_recall_size,
+        count_and_facet_mode=count_and_facet_mode,
     )
 
     search_kwargs: Dict[str, Any] = {
@@ -816,8 +941,15 @@ async def semantic_hybrid_search(
         "top": top,
         "include_total_count": True,
     }
+    if hybrid_search_config:
+        search_kwargs["hybrid_search"] = hybrid_search_config
+    if vector_filter_mode:
+        search_kwargs["vector_filter_mode"] = vector_filter_mode
+    if semantic_query:
+        search_kwargs["semantic_query"] = semantic_query
     if query_caption:
         search_kwargs["query_caption"] = query_caption
+        search_kwargs["query_caption_highlight_enabled"] = query_caption_highlight_enabled
     if query_answer:
         search_kwargs["query_answer"] = query_answer
         if query_answer_count is not None:
@@ -830,6 +962,12 @@ async def semantic_hybrid_search(
         search_kwargs["select"] = _comma_split(select)
     if search_fields:
         search_kwargs["search_fields"] = _comma_split(search_fields)
+    if semantic_error_mode:
+        search_kwargs["semantic_error_mode"] = semantic_error_mode
+    if semantic_max_wait_in_milliseconds is not None:
+        search_kwargs["semantic_max_wait_in_milliseconds"] = semantic_max_wait_in_milliseconds
+    if debug:
+        search_kwargs["debug"] = debug
 
     return await _execute_search(
         endpoint=resolved_endpoint,
@@ -892,108 +1030,106 @@ def _parse_key_value_configs(config_str: str) -> List[Dict[str, Any]]:
 
 @mcp.tool(
     name="agentic_retrieval",
-    description="Run Azure AI Search agentic retrieval pipeline with flexible knowledge source configuration (2025-11-01-preview API).",
+    description="Run Azure AI Search Knowledge Base retrieval through the latest Python SDK preview shape.",
 )
 async def agentic_retrieval(
     knowledge_base_name: str,
     query: str,
     intent_query: str = "",
-    reasoning_effort: str = "",
+    reasoning_effort: str = "low",
     output_mode: str = "answerSynthesis",
     include_activity: bool = True,
     max_runtime_seconds: int = 0,
     max_output_size: int = 0,
+    max_output_documents: int = 0,
     knowledge_source_configs: str = "",
+    query_source_authorization: str = "",
     api_key: str = "",
     endpoint: str = "",
 ) -> Dict[str, Any]:
-    """调用 Azure AI Search Knowledge Base 的 Agentic Retrieval 接口。
-
-    参数:
-        knowledge_base_name: 要查询的 knowledge base 名称。
-        query: 用户问题或查询文本，不能为空。
-        intent_query: 可选的显式检索意图，用于绕过默认的查询规划。
-        reasoning_effort: 检索推理强度，可选值为 minimal、low、medium。
-        output_mode: 输出模式，支持 answerSynthesis 或 extractedData。
-        include_activity: 是否在结果中返回 activity 调试信息。
-        max_runtime_seconds: 服务端允许的最大运行时长（秒）。
-        max_output_size: 输出 token 上限。
-        knowledge_source_configs: 知识源配置字符串，使用 key=value 形式并以分号分隔多个来源。
-        api_key: 可选的管理员密钥覆盖值。
-        endpoint: 可选的 Azure Search 终结点覆盖值。
-
-    返回:
-        Dict[str, Any]: 格式化后的检索结果，包含 answer、references 以及 _status_code。
-    """
+    """调用 Azure AI Search Knowledge Base Retrieval SDK。"""
     # Convert empty strings and sentinel values to None
     intent_query = None if intent_query == "" else intent_query
     reasoning_effort = None if reasoning_effort == "" else reasoning_effort
+    output_mode = None if output_mode == "" else output_mode
     max_runtime_seconds = None if max_runtime_seconds == 0 else max_runtime_seconds
     max_output_size = None if max_output_size == 0 else max_output_size
+    max_output_documents = None if max_output_documents == 0 else max_output_documents
     knowledge_source_configs = None if knowledge_source_configs == "" else knowledge_source_configs
+    query_source_authorization = None if query_source_authorization == "" else query_source_authorization
     api_key = None if api_key == "" else api_key
     endpoint = None if endpoint == "" else endpoint
 
     resolved_endpoint = _resolve_endpoint(endpoint)
     key = _resolve_admin_key(api_key)
 
-    request_body: Dict[str, Any] = {
-        "includeActivity": include_activity,
-        "outputMode": output_mode,
-    }
-
     if not query:
         raise ValueError("`query` must be provided for agentic retrieval requests.")
-    request_body["messages"] = _build_messages_from_query(query)
 
-    if intent_query:
-        request_body.setdefault("intents", []).append({"type": "semantic", "search": intent_query})
+    reasoning = _build_reasoning_effort(reasoning_effort)
+    use_intent = (reasoning_effort or "").lower() == "minimal" or intent_query is not None
+    if use_intent and output_mode == "answerSynthesis":
+        raise ValueError("answerSynthesis requires message-based retrieval. Use output_mode=extractedData for minimal intent retrieval.")
 
-    if reasoning_effort:
-        effort_kind = reasoning_effort.lower()
-        if effort_kind not in {"minimal", "low", "medium"}:
-            raise ValueError("reasoning_effort must be one of: minimal, low, medium")
-        request_body["retrievalReasoningEffort"] = {"kind": effort_kind}
-
+    request_kwargs: Dict[str, Any] = {
+        "include_activity": include_activity,
+    }
+    if use_intent:
+        request_kwargs["intents"] = [
+            KnowledgeRetrievalSemanticIntent(search=intent_query or query)
+        ]
+    else:
+        request_kwargs["messages"] = [
+            KnowledgeBaseMessage(
+                role=message["role"],
+                content=[
+                    KnowledgeBaseMessageTextContent(text=part["text"])
+                    for part in message["content"]
+                    if part.get("type") == "text"
+                ],
+            )
+            for message in _build_messages_from_query(query)
+        ]
+    if reasoning:
+        request_kwargs["retrieval_reasoning_effort"] = reasoning
+    if output_mode:
+        request_kwargs["output_mode"] = output_mode
     if max_runtime_seconds is not None:
-        request_body["maxRuntimeInSeconds"] = max_runtime_seconds
+        request_kwargs["max_runtime_in_seconds"] = max_runtime_seconds
     if max_output_size is not None:
-        request_body["maxOutputSize"] = max_output_size
-
-    # Parse knowledge source configurations using key-value format
+        request_kwargs["max_output_size"] = max_output_size
+    if max_output_documents is not None:
+        request_kwargs["max_output_documents"] = max_output_documents
     if knowledge_source_configs:
         try:
-            sources = _parse_key_value_configs(knowledge_source_configs)
-            request_body["knowledgeSourceParams"] = sources
+            request_kwargs["knowledge_source_params"] = _parse_key_value_configs(knowledge_source_configs)
         except ValueError as exc:
             raise ValueError(f"Failed to parse knowledge_source_configs: {exc}") from exc
 
-    url = (
-        f"{resolved_endpoint}/knowledgebases('{quote(knowledge_base_name, safe='')}')/retrieve"
-        f"?api-version={AGENTIC_API_VERSION}"
-    )
+    request = KnowledgeBaseRetrievalRequest(**request_kwargs)
 
     timeout_budget: int = _build_agentic_timeout_budget(max_runtime_seconds)
-    headers = {
-        "api-key": key,
-        "Content-Type": "application/json",
-    }
+    client = KnowledgeBaseRetrievalClient(
+        endpoint=resolved_endpoint,
+        credential=AzureKeyCredential(key),
+        knowledge_base_name=knowledge_base_name,
+    )
 
     try:
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=timeout_budget)) as session:
-            async with session.post(url, headers=headers, json=request_body) as resp:
-                text = await resp.text()
-                if resp.status not in (200, 206):
-                    raise RuntimeError(f"Agentic retrieval failed ({resp.status}): {text}")
-                try:
-                    raw_data = json.loads(text)
-                except json.JSONDecodeError:
-                    raw_data = {"raw": text}
-
-                # Format the response
-                formatted_data = _format_agentic_response(raw_data)
-                formatted_data["_status_code"] = resp.status
-                return formatted_data
+        async with client:
+            retrieve_kwargs: Dict[str, Any] = {"retrieval_request": request}
+            if query_source_authorization:
+                retrieve_kwargs["query_source_authorization"] = query_source_authorization
+            result = await asyncio.wait_for(
+                client.retrieve(**retrieve_kwargs),
+                timeout=timeout_budget,
+            )
+        raw_data = _to_plain_data(result)
+        formatted_data = _format_agentic_response(raw_data)
+        formatted_data["request"] = request.as_dict()
+        return formatted_data
+    except HttpResponseError as exc:
+        raise RuntimeError(f"Agentic retrieval failed ({exc.status_code}): {exc.message}") from exc
     except asyncio.TimeoutError as exc:
         raise RuntimeError(
             "Agentic retrieval timed out while waiting for Azure AI Search to respond. "
