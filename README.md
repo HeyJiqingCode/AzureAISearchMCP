@@ -11,7 +11,7 @@ A Model Context Protocol (MCP) server that exposes Azure AI Search capabilities 
 - Call Azure AI Search Knowledge Base retrieval with `azure-search-documents` 12.1 preview SDK support.
 - Tune modern vector and hybrid retrieval settings such as oversampling, vector filter mode, filter overrides, semantic debug, and `hybridSearch.maxTextRecallSize`.
 - Support integrated vectorization when your index has an attached vectorizer (no manual embeddings required).
-- Tools read `AZURE_SEARCH_ENDPOINT` and key env vars at runtime. Traditional search tools fall back to `AZURE_SEARCH_QUERY_KEY`, while the agentic tool falls back to `AZURE_SEARCH_ADMIN_KEY`. Pass `endpoint`/`api_key` parameters only when you need to override per-call.
+- Tools read `AZURE_SEARCH_ENDPOINT` and key env vars at runtime. Traditional search tools use `AZURE_SEARCH_QUERY_KEY`, while the agentic tool uses `AZURE_SEARCH_ADMIN_KEY`.
 
 ## Quick Start
 
@@ -57,7 +57,7 @@ python src/mcp/server.py --transport sse --host 0.0.0.0 --port 8000
 python src/mcp/server.py --transport streamable-http --host 0.0.0.0 --port 8000
 ```
 
-The server can start without `AZURE_SEARCH_ENDPOINT` if your MCP client passes `endpoint` in each tool call.
+Set `AZURE_SEARCH_ENDPOINT` in the environment or pass `--endpoint` when starting the server.
 
 **5/ Add MCP Server to your client for Streamable HTTP**
 ```json
@@ -117,7 +117,7 @@ docker run -itd -p 8000:8000 --name AzureAISearch \
 
 ## Available Tools
 
-Each tool accepts an optional `api_key` and `endpoint` so you can override defaults at invocation time. All responses include:
+Search tools expose common retrieval parameters at the top level. Low-frequency SDK tuning options go in `advanced_options` as a JSON object string. All responses include:
 - `documents`: list of normalized documents (with `@search.score`, etc.).
 - `count`: total number of documents matched (if available).
 - `answers`, `captions`, `facets`: when returned by the service.
@@ -129,7 +129,7 @@ Keyword (BM25) search over an index using simple query syntax, with optional fil
 
 **Parameters:**
 
-index_name, query, top=5, skip=0, search_fields=None, select=None, filter=None, search_mode="any", api_key=None, endpoint=None
+index_name, query, top=5, skip=0, search_fields=None, select=None, filter=None, search_mode="any", advanced_options=""
 
 **Example Usage:**
 ```json
@@ -150,7 +150,7 @@ Semantic reranked search returning optional captions and answers when the index 
 
 **Parameters:**
 
-index_name, query, semantic_configuration, top=5, skip=0, select=None, filter=None, semantic_query=None, query_caption="extractive", query_caption_highlight_enabled=True, query_answer=None, semantic_error_mode=None, semantic_max_wait_in_milliseconds=None, debug=None, api_key=None, endpoint=None
+index_name, query, semantic_configuration, top=5, skip=0, select=None, filter=None, query_caption="extractive", query_caption_highlight_enabled=True, query_answer=None, advanced_options=""
 
 **Example Usage:**
 
@@ -172,7 +172,7 @@ Vector-only similarity search using integrated vectorization (text-to-embedding)
 
 **Parameters:**
 
-index_name, vector_fields, vector_text, k=10, exhaustive=False, weight=None, oversampling=None, filter_override=None, vector_filter_mode=None, vector_similarity_threshold=None, search_score_threshold=None, select=None, filter=None, debug=None, api_key=None, endpoint=None
+index_name, vector_fields, vector_text, k=10, select=None, filter=None, advanced_options=""
 
 **Example Usage:**
 
@@ -195,7 +195,7 @@ Hybrid (keyword + vector) search that fuses BM25 and vector similarity results u
 
 **Parameters:**
 
-index_name, query, vector_fields, vector_text, k=10, top=10, exhaustive=False, weight=None, oversampling=None, filter_override=None, vector_filter_mode=None, vector_similarity_threshold=None, search_score_threshold=None, max_text_recall_size=None, count_and_facet_mode=None, select=None, filter=None, search_fields=None, debug=None, api_key=None, endpoint=None
+index_name, query, vector_fields, vector_text, k=10, top=10, select=None, filter=None, search_fields=None, advanced_options=""
 
 **Example Usage:**
 
@@ -209,7 +209,8 @@ index_name, query, vector_fields, vector_text, k=10, top=10, exhaustive=False, w
     "vector_text": "How to config Wifi for Windows PC?",
     "k": 20,
     "top": 5,
-    "search_fields": "title,body"
+    "search_fields": "title,body",
+    "advanced_options": "{\"max_text_recall_size\":100,\"vector_filter_mode\":\"preFilter\"}"
   }
 }
 ```
@@ -220,7 +221,7 @@ Hybrid (keyword + vector) search with semantic reranking, captions, and answers 
 
 **Parameters:**
 
-index_name, query, vector_fields, semantic_configuration, vector_text, k=50, top=10, exhaustive=False, weight=None, oversampling=None, filter_override=None, vector_filter_mode=None, vector_similarity_threshold=None, search_score_threshold=None, max_text_recall_size=None, count_and_facet_mode=None, select=None, filter=None, search_fields=None, semantic_query=None, query_caption="extractive", query_caption_highlight_enabled=True, query_answer=None, semantic_error_mode=None, semantic_max_wait_in_milliseconds=None, debug=None, api_key=None, endpoint=None
+index_name, query, vector_fields, semantic_configuration, vector_text, k=50, top=10, select=None, filter=None, search_fields=None, query_caption="extractive", query_caption_highlight_enabled=True, query_answer=None, advanced_options=""
 
 **Example Usage:**
 
@@ -236,14 +237,31 @@ index_name, query, vector_fields, semantic_configuration, vector_text, k=50, top
     "k": 30,
     "top": 5,
     "query_caption": "extractive",
-    "query_answer": "extractive"
+    "query_answer": "extractive",
+    "advanced_options": "{\"max_text_recall_size\":100,\"semantic_error_mode\":\"partial\"}"
   }
 }
 ```
 
+### `advanced_options`
+
+`advanced_options` is a JSON object string. Unsupported keys are rejected so accidental SDK passthrough does not hide mistakes.
+
+Common keys:
+`debug`
+
+Semantic keys:
+`semantic_query`, `query_answer_count`, `query_answer_threshold`, `semantic_error_mode`, `semantic_max_wait_in_milliseconds`
+
+Vector keys:
+`exhaustive`, `weight`, `oversampling`, `filter_override`, `vector_filter_mode`, `vector_similarity_threshold`, `search_score_threshold`
+
+Hybrid keys:
+`max_text_recall_size`, `count_and_facet_mode`
+
 ### `agentic_retrieval`
 
-Run Azure AI Search Knowledge Base retrieval through the Python SDK preview client. Requires `AZURE_SEARCH_ADMIN_KEY` or an admin key passed via `api_key`.
+Run Azure AI Search Knowledge Base retrieval through the Python SDK preview client. Requires `AZURE_SEARCH_ADMIN_KEY`.
 
 **Parameters (frequently used):**
 
@@ -256,7 +274,6 @@ Run Azure AI Search Knowledge Base retrieval through the Python SDK preview clie
 - `max_runtime_seconds`, `max_output_size`, `max_output_documents` (Optional[int])
 - `knowledge_source_configs` (Optional[str]) – JSON string for configuring one or more knowledge sources.
 - `query_source_authorization` (Optional[str]) – end-user token for query-time permission enforcement
-- `api_key`, `endpoint`
 
 `answerSynthesis` requires message-based retrieval (`low` or `medium`). Use `reasoning_effort="minimal"` with `output_mode="extractedData"` for direct semantic intent retrieval.
 

@@ -96,13 +96,37 @@ AGENTIC_HTTP_TIMEOUT_SECONDS: Final[int] = int(
 AGENTIC_TIMEOUT_BUFFER_SECONDS: Final[int] = int(os.getenv("AZURE_SEARCH_AGENTIC_TIMEOUT_BUFFER", "30"))
 DEFAULT_MCP_HOST: Final[str] = os.getenv("MCP_HOST", "0.0.0.0")
 DEFAULT_MCP_PORT: Final[int] = int(os.getenv("MCP_PORT", "8000"))
+COMMON_ADVANCED_OPTION_KEYS: Final[frozenset[str]] = frozenset({"debug"})
+SEMANTIC_ADVANCED_OPTION_KEYS: Final[frozenset[str]] = frozenset(
+    {
+        "semantic_query",
+        "query_answer_count",
+        "query_answer_threshold",
+        "semantic_error_mode",
+        "semantic_max_wait_in_milliseconds",
+    }
+)
+VECTOR_ADVANCED_OPTION_KEYS: Final[frozenset[str]] = frozenset(
+    {
+        "exhaustive",
+        "weight",
+        "oversampling",
+        "filter_override",
+        "vector_filter_mode",
+        "vector_similarity_threshold",
+        "search_score_threshold",
+    }
+)
+HYBRID_ADVANCED_OPTION_KEYS: Final[frozenset[str]] = frozenset(
+    {"max_text_recall_size", "count_and_facet_mode"}
+)
 
 
 def _resolve_endpoint(endpoint: Optional[str] = None) -> str:
     resolved = endpoint or AZURE_SEARCH_ENDPOINT
     if not resolved:
         raise RuntimeError(
-            "Azure Search endpoint is not configured. Set AZURE_SEARCH_ENDPOINT or pass endpoint explicitly."
+            "Azure Search endpoint is not configured. Set AZURE_SEARCH_ENDPOINT or start the server with --endpoint."
         )
     return resolved.rstrip("/")
 
@@ -112,7 +136,7 @@ def _resolve_key(explicit_key: Optional[str]) -> str:
         return explicit_key
     if DEFAULT_QUERY_KEY:
         return DEFAULT_QUERY_KEY
-    raise RuntimeError("Azure Search API key is not configured. Provide api_key or set AZURE_SEARCH_QUERY_KEY.")
+    raise RuntimeError("Azure Search query key is not configured. Set AZURE_SEARCH_QUERY_KEY.")
 
 
 def _resolve_admin_key(explicit_key: Optional[str]) -> str:
@@ -121,15 +145,37 @@ def _resolve_admin_key(explicit_key: Optional[str]) -> str:
     if DEFAULT_ADMIN_KEY:
         return DEFAULT_ADMIN_KEY
     raise RuntimeError(
-        "Agentic retrieval requires an admin key. Provide api_key or set AZURE_SEARCH_ADMIN_KEY."
+        "Agentic retrieval requires an admin key. Set AZURE_SEARCH_ADMIN_KEY."
     )
 
 
 # 统一解析单次工具调用的连接信息，普通查询用 query key，Agentic 用 admin key。
-def _resolve_call_context(api_key: str, endpoint: str, *, admin: bool = False) -> Tuple[str, str]:
-    resolved_endpoint = _resolve_endpoint(_none_if_empty(endpoint))
-    key = _resolve_admin_key(_none_if_empty(api_key)) if admin else _resolve_key(_none_if_empty(api_key))
+def _resolve_call_context(*, admin: bool = False) -> Tuple[str, str]:
+    resolved_endpoint = _resolve_endpoint()
+    key = _resolve_admin_key(None) if admin else _resolve_key(None)
     return resolved_endpoint, key
+
+
+# 解析 JSON 字符串形式的高级参数，并用白名单约束客户可配置范围。
+def _parse_json_options(options: str, *, allowed_keys: frozenset[str], label: str) -> Dict[str, Any]:
+    if not options.strip():
+        return {}
+
+    try:
+        parsed = json.loads(options)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{label} must be a JSON object.") from exc
+
+    if not isinstance(parsed, dict):
+        raise ValueError(f"{label} must be a JSON object.")
+
+    unknown_keys = sorted(set(parsed) - set(allowed_keys))
+    if unknown_keys:
+        allowed = ", ".join(sorted(allowed_keys))
+        unknown = ", ".join(unknown_keys)
+        raise ValueError(f"Unsupported {label} keys: {unknown}. Allowed keys: {allowed}.")
+
+    return parsed
 
 
 async def _maybe_await(result: Any) -> Any:
@@ -530,8 +576,7 @@ async def simple_search(
     select: str = "",
     filter: str = "",
     search_mode: str = "any",
-    api_key: str = "",
-    endpoint: str = "",
+    advanced_options: str = "",
 ) -> Dict[str, Any]:
     """Run a standard keyword search against Azure AI Search.
 
@@ -553,15 +598,17 @@ async def simple_search(
         OData filter expression applied before keyword search.
     search_mode: str, optional
         "any" (default) or "all" to control precision/recall.
-    api_key / endpoint: Optional[str]
-        Override default query key or endpoint for this call.
-
     Returns
     -------
     dict
         Response containing `documents`, `count`, optional `facets`, and `continuation_token`.
     """
-    resolved_endpoint, key = _resolve_call_context(api_key, endpoint)
+    resolved_endpoint, key = _resolve_call_context()
+    advanced = _parse_json_options(
+        advanced_options,
+        allowed_keys=COMMON_ADVANCED_OPTION_KEYS,
+        label="advanced_options",
+    )
     search_kwargs: Dict[str, Any] = {
         "top": top,
         "skip": skip,
@@ -573,6 +620,7 @@ async def simple_search(
         select=_none_if_empty(select),
         filter=_none_if_empty(filter),
         search_fields=_none_if_empty(search_fields),
+        debug=_none_if_empty(advanced.get("debug", "")),
     )
 
     return await _execute_search(
@@ -596,17 +644,10 @@ async def semantic_search(
     skip: int = 0,
     select: str = "",
     filter: str = "",
-    api_key: str = "",
-    endpoint: str = "",
-    semantic_query: str = "",
     query_caption: str = "extractive",
     query_caption_highlight_enabled: bool = True,
     query_answer: str = "",
-    query_answer_count: int = 0,
-    query_answer_threshold: float = 0.0,
-    semantic_error_mode: str = "",
-    semantic_max_wait_in_milliseconds: int = 0,
-    debug: str = "",
+    advanced_options: str = "",
 ) -> Dict[str, Any]:
     """Execute semantic ranking against a configured index.
 
@@ -622,19 +663,20 @@ async def semantic_search(
         Pagination controls (top defaults to 5).
     select / filter: Optional[str]
         Shape the fields returned and pre-filter documents.
-    api_key / endpoint: Optional[str]
-        Override default connection information.
     query_caption / query_answer: Optional[str]
         Semantic caption and answer modes (`"extractive"`, `"summary"`, etc.).
-    query_answer_count / query_answer_threshold: Optional
-        Controls for the number of answers and confidence threshold.
 
     Returns
     -------
     dict
         Response containing `documents`, `count`, optional `answers`, `captions`, and continuation metadata.
     """
-    resolved_endpoint, key = _resolve_call_context(api_key, endpoint)
+    resolved_endpoint, key = _resolve_call_context()
+    advanced = _parse_json_options(
+        advanced_options,
+        allowed_keys=COMMON_ADVANCED_OPTION_KEYS | SEMANTIC_ADVANCED_OPTION_KEYS,
+        label="advanced_options",
+    )
 
     search_kwargs: Dict[str, Any] = {
         "query_type": "semantic",
@@ -647,18 +689,20 @@ async def semantic_search(
         search_kwargs,
         select=_none_if_empty(select),
         filter=_none_if_empty(filter),
-        debug=_none_if_empty(debug),
+        debug=_none_if_empty(advanced.get("debug", "")),
     )
     _add_semantic_options(
         search_kwargs,
-        semantic_query=_none_if_empty(semantic_query) or query,
+        semantic_query=_none_if_empty(advanced.get("semantic_query", "")) or query,
         query_caption=query_caption,
         query_caption_highlight_enabled=query_caption_highlight_enabled,
         query_answer=_none_if_empty(query_answer),
-        query_answer_count=_none_if_zero(query_answer_count),
-        query_answer_threshold=_none_if_zero(query_answer_threshold),
-        semantic_error_mode=_none_if_empty(semantic_error_mode),
-        semantic_max_wait_in_milliseconds=_none_if_zero(semantic_max_wait_in_milliseconds),
+        query_answer_count=_none_if_zero(advanced.get("query_answer_count", 0)),
+        query_answer_threshold=_none_if_zero(advanced.get("query_answer_threshold", 0.0)),
+        semantic_error_mode=_none_if_empty(advanced.get("semantic_error_mode", "")),
+        semantic_max_wait_in_milliseconds=_none_if_zero(
+            advanced.get("semantic_max_wait_in_milliseconds", 0)
+        ),
     )
 
     return await _execute_search(
@@ -679,18 +723,9 @@ async def vector_search(
     vector_fields: str,
     vector_text: str,
     k: int = 10,
-    exhaustive: bool = False,
-    weight: float = 0.0,
-    oversampling: float = 0.0,
-    filter_override: str = "",
-    vector_filter_mode: str = "",
-    vector_similarity_threshold: float = 0.0,
-    search_score_threshold: float = 0.0,
     select: str = "",
     filter: str = "",
-    debug: str = "",
-    api_key: str = "",
-    endpoint: str = "",
+    advanced_options: str = "",
 ) -> Dict[str, Any]:
     """Perform pure vector similarity search.
 
@@ -704,21 +739,20 @@ async def vector_search(
         Raw query text to be vectorized using the index's configured vectorizer.
     k: int, optional
         Number of nearest neighbors to retrieve (default 10).
-    exhaustive: bool, optional
-        Use exhaustive KNN instead of ANN when True.
-    weight: Optional[float]
-        Weight assigned to the vector query (relevant when mixing multiple vectors).
     select / filter: Optional[str]
         Restrict fields returned or apply filters before vector scoring.
-    api_key / endpoint: Optional[str]
-        Override default connection information.
 
     Returns
     -------
     dict
         Response containing `documents`, `count`, and `continuation_token`.
     """
-    resolved_endpoint, key = _resolve_call_context(api_key, endpoint)
+    resolved_endpoint, key = _resolve_call_context()
+    advanced = _parse_json_options(
+        advanced_options,
+        allowed_keys=COMMON_ADVANCED_OPTION_KEYS | VECTOR_ADVANCED_OPTION_KEYS,
+        label="advanced_options",
+    )
 
     search_kwargs: Dict[str, Any] = {
         "top": k,
@@ -729,19 +763,19 @@ async def vector_search(
         vector_text=vector_text,
         vector_fields=vector_fields,
         k=k,
-        exhaustive=exhaustive,
-        weight=_none_if_zero(weight),
-        oversampling=_none_if_zero(oversampling),
-        filter_override=_none_if_empty(filter_override),
-        vector_similarity_threshold=_none_if_zero(vector_similarity_threshold),
-        search_score_threshold=_none_if_zero(search_score_threshold),
-        vector_filter_mode=_none_if_empty(vector_filter_mode),
+        exhaustive=advanced.get("exhaustive", False),
+        weight=_none_if_zero(advanced.get("weight", 0.0)),
+        oversampling=_none_if_zero(advanced.get("oversampling", 0.0)),
+        filter_override=_none_if_empty(advanced.get("filter_override", "")),
+        vector_similarity_threshold=_none_if_zero(advanced.get("vector_similarity_threshold", 0.0)),
+        search_score_threshold=_none_if_zero(advanced.get("search_score_threshold", 0.0)),
+        vector_filter_mode=_none_if_empty(advanced.get("vector_filter_mode", "")),
     )
     _add_common_search_options(
         search_kwargs,
         select=_none_if_empty(select),
         filter=_none_if_empty(filter),
-        debug=_none_if_empty(debug),
+        debug=_none_if_empty(advanced.get("debug", "")),
     )
 
     return await _execute_search(
@@ -764,21 +798,10 @@ async def hybrid_search(
     vector_text: str,
     k: int = 10,
     top: int = 10,
-    exhaustive: bool = False,
-    weight: float = 0.0,
-    oversampling: float = 0.0,
-    filter_override: str = "",
-    vector_filter_mode: str = "",
-    vector_similarity_threshold: float = 0.0,
-    search_score_threshold: float = 0.0,
-    max_text_recall_size: int = 0,
-    count_and_facet_mode: str = "",
     select: str = "",
     filter: str = "",
     search_fields: str = "",
-    debug: str = "",
-    api_key: str = "",
-    endpoint: str = "",
+    advanced_options: str = "",
 ) -> Dict[str, Any]:
     """Combine lexical and vector retrieval in a single request.
 
@@ -794,22 +817,23 @@ async def hybrid_search(
         Raw query text to be vectorized.
     k / top: int, optional
         Vector candidate count (k) and final result count (top).
-    exhaustive / weight: optional
-        Control vector search exhaustive mode and weighting.
     select / filter / search_fields: Optional[str]
         Customize returned fields, filters, or lexical scope.
-    api_key / endpoint: Optional[str]
-        Override default connection information.
 
     Returns
     -------
     dict
         Response containing merged `documents`, `count`, and continuation metadata.
     """
-    resolved_endpoint, key = _resolve_call_context(api_key, endpoint)
+    resolved_endpoint, key = _resolve_call_context()
+    advanced = _parse_json_options(
+        advanced_options,
+        allowed_keys=COMMON_ADVANCED_OPTION_KEYS | VECTOR_ADVANCED_OPTION_KEYS | HYBRID_ADVANCED_OPTION_KEYS,
+        label="advanced_options",
+    )
     hybrid_search_config = _build_hybrid_search(
-        max_text_recall_size=_none_if_zero(max_text_recall_size),
-        count_and_facet_mode=_none_if_empty(count_and_facet_mode),
+        max_text_recall_size=_none_if_zero(advanced.get("max_text_recall_size", 0)),
+        count_and_facet_mode=_none_if_empty(advanced.get("count_and_facet_mode", "")),
     )
 
     search_kwargs: Dict[str, Any] = {
@@ -822,20 +846,20 @@ async def hybrid_search(
         vector_text=vector_text,
         vector_fields=vector_fields,
         k=k,
-        exhaustive=exhaustive,
-        weight=_none_if_zero(weight),
-        oversampling=_none_if_zero(oversampling),
-        filter_override=_none_if_empty(filter_override),
-        vector_similarity_threshold=_none_if_zero(vector_similarity_threshold),
-        search_score_threshold=_none_if_zero(search_score_threshold),
-        vector_filter_mode=_none_if_empty(vector_filter_mode),
+        exhaustive=advanced.get("exhaustive", False),
+        weight=_none_if_zero(advanced.get("weight", 0.0)),
+        oversampling=_none_if_zero(advanced.get("oversampling", 0.0)),
+        filter_override=_none_if_empty(advanced.get("filter_override", "")),
+        vector_similarity_threshold=_none_if_zero(advanced.get("vector_similarity_threshold", 0.0)),
+        search_score_threshold=_none_if_zero(advanced.get("search_score_threshold", 0.0)),
+        vector_filter_mode=_none_if_empty(advanced.get("vector_filter_mode", "")),
     )
     _add_common_search_options(
         search_kwargs,
         select=_none_if_empty(select),
         filter=_none_if_empty(filter),
         search_fields=_none_if_empty(search_fields),
-        debug=_none_if_empty(debug),
+        debug=_none_if_empty(advanced.get("debug", "")),
     )
 
     return await _execute_search(
@@ -859,29 +883,13 @@ async def semantic_hybrid_search(
     vector_text: str,
     k: int = 50,
     top: int = 10,
-    exhaustive: bool = False,
-    weight: float = 0.0,
-    oversampling: float = 0.0,
-    filter_override: str = "",
-    vector_filter_mode: str = "",
-    vector_similarity_threshold: float = 0.0,
-    search_score_threshold: float = 0.0,
-    max_text_recall_size: int = 0,
-    count_and_facet_mode: str = "",
     select: str = "",
     filter: str = "",
     search_fields: str = "",
-    semantic_query: str = "",
     query_caption: str = "extractive",
     query_caption_highlight_enabled: bool = True,
     query_answer: str = "",
-    query_answer_count: int = 0,
-    query_answer_threshold: float = 0.0,
-    semantic_error_mode: str = "",
-    semantic_max_wait_in_milliseconds: int = 0,
-    debug: str = "",
-    api_key: str = "",
-    endpoint: str = "",
+    advanced_options: str = "",
 ) -> Dict[str, Any]:
     """Run hybrid retrieval with semantic reranking.
 
@@ -899,26 +907,30 @@ async def semantic_hybrid_search(
         Raw query text used for vectorization.
     k / top: int, optional
         Vector candidate count and final result count (top defaults to 10).
-    exhaustive / weight: optional
-        Controls for vector recall and weighting.
     query_caption / query_answer: Optional[str]
         Semantic caption and answer modes (`"extractive"`, `"summary"`, etc.).
-    query_answer_count / query_answer_threshold: Optional
-        Controls for the number of answers and confidence threshold.
     select / filter / search_fields: Optional[str]
         Additional shaping of results and filters.
-    api_key / endpoint: Optional[str]
-        Override default connection information.
 
     Returns
     -------
     dict
         Response containing `documents`, `count`, optional `answers`, `captions`, and continuation metadata.
     """
-    resolved_endpoint, key = _resolve_call_context(api_key, endpoint)
+    resolved_endpoint, key = _resolve_call_context()
+    advanced = _parse_json_options(
+        advanced_options,
+        allowed_keys=(
+            COMMON_ADVANCED_OPTION_KEYS
+            | SEMANTIC_ADVANCED_OPTION_KEYS
+            | VECTOR_ADVANCED_OPTION_KEYS
+            | HYBRID_ADVANCED_OPTION_KEYS
+        ),
+        label="advanced_options",
+    )
     hybrid_search_config = _build_hybrid_search(
-        max_text_recall_size=_none_if_zero(max_text_recall_size),
-        count_and_facet_mode=_none_if_empty(count_and_facet_mode),
+        max_text_recall_size=_none_if_zero(advanced.get("max_text_recall_size", 0)),
+        count_and_facet_mode=_none_if_empty(advanced.get("count_and_facet_mode", "")),
     )
 
     search_kwargs: Dict[str, Any] = {
@@ -933,31 +945,33 @@ async def semantic_hybrid_search(
         vector_text=vector_text,
         vector_fields=vector_fields,
         k=k,
-        exhaustive=exhaustive,
-        weight=_none_if_zero(weight),
-        oversampling=_none_if_zero(oversampling),
-        filter_override=_none_if_empty(filter_override),
-        vector_similarity_threshold=_none_if_zero(vector_similarity_threshold),
-        search_score_threshold=_none_if_zero(search_score_threshold),
-        vector_filter_mode=_none_if_empty(vector_filter_mode),
+        exhaustive=advanced.get("exhaustive", False),
+        weight=_none_if_zero(advanced.get("weight", 0.0)),
+        oversampling=_none_if_zero(advanced.get("oversampling", 0.0)),
+        filter_override=_none_if_empty(advanced.get("filter_override", "")),
+        vector_similarity_threshold=_none_if_zero(advanced.get("vector_similarity_threshold", 0.0)),
+        search_score_threshold=_none_if_zero(advanced.get("search_score_threshold", 0.0)),
+        vector_filter_mode=_none_if_empty(advanced.get("vector_filter_mode", "")),
     )
     _add_common_search_options(
         search_kwargs,
         select=_none_if_empty(select),
         filter=_none_if_empty(filter),
         search_fields=_none_if_empty(search_fields),
-        debug=_none_if_empty(debug),
+        debug=_none_if_empty(advanced.get("debug", "")),
     )
     _add_semantic_options(
         search_kwargs,
-        semantic_query=_none_if_empty(semantic_query),
+        semantic_query=_none_if_empty(advanced.get("semantic_query", "")),
         query_caption=query_caption,
         query_caption_highlight_enabled=query_caption_highlight_enabled,
         query_answer=_none_if_empty(query_answer),
-        query_answer_count=_none_if_zero(query_answer_count),
-        query_answer_threshold=_none_if_zero(query_answer_threshold),
-        semantic_error_mode=_none_if_empty(semantic_error_mode),
-        semantic_max_wait_in_milliseconds=_none_if_zero(semantic_max_wait_in_milliseconds),
+        query_answer_count=_none_if_zero(advanced.get("query_answer_count", 0)),
+        query_answer_threshold=_none_if_zero(advanced.get("query_answer_threshold", 0.0)),
+        semantic_error_mode=_none_if_empty(advanced.get("semantic_error_mode", "")),
+        semantic_max_wait_in_milliseconds=_none_if_zero(
+            advanced.get("semantic_max_wait_in_milliseconds", 0)
+        ),
     )
 
     return await _execute_search(
@@ -1014,8 +1028,6 @@ async def agentic_retrieval(
     max_output_documents: int = 0,
     knowledge_source_configs: str = "",
     query_source_authorization: str = "",
-    api_key: str = "",
-    endpoint: str = "",
 ) -> Dict[str, Any]:
     """调用 Azure AI Search Knowledge Base Retrieval SDK。"""
     intent_query = _none_if_empty(intent_query)
@@ -1027,7 +1039,7 @@ async def agentic_retrieval(
     knowledge_source_configs = _none_if_empty(knowledge_source_configs)
     query_source_authorization = _none_if_empty(query_source_authorization)
 
-    resolved_endpoint, key = _resolve_call_context(api_key, endpoint, admin=True)
+    resolved_endpoint, key = _resolve_call_context(admin=True)
 
     if not query:
         raise ValueError("`query` must be provided for agentic retrieval requests.")
@@ -1142,7 +1154,7 @@ def main() -> None:
     else:
         logger.warning(
             "Azure Search endpoint is not configured. The server can start, "
-            "but each tool call must pass endpoint or set AZURE_SEARCH_ENDPOINT."
+            "but search tools require AZURE_SEARCH_ENDPOINT or the --endpoint startup argument."
         )
 
     transport_kwargs: Dict[str, Any] = {}
