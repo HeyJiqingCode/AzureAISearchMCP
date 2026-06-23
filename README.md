@@ -254,7 +254,7 @@ Run Azure AI Search Knowledge Base retrieval through the Python SDK preview clie
 - `output_mode` (str) – `answerSynthesis` or `extractedData`; default is `answerSynthesis`
 - `include_activity` (bool)
 - `max_runtime_seconds`, `max_output_size`, `max_output_documents` (Optional[int])
-- `knowledge_source_configs` (Optional[str]) – JSON string for configuring one or more knowledge sources. The older `key=value` format is still accepted for compatibility.
+- `knowledge_source_configs` (Optional[str]) – JSON string for configuring one or more knowledge sources.
 - `query_source_authorization` (Optional[str]) – end-user token for query-time permission enforcement
 - `api_key`, `endpoint`
 
@@ -262,7 +262,7 @@ Run Azure AI Search Knowledge Base retrieval through the Python SDK preview clie
 
 **Knowledge Source Configuration:**
 
-Use `knowledge_source_configs` to specify one or more knowledge sources with per-source settings. Prefer a JSON object or JSON array encoded as a string.
+Use `knowledge_source_configs` to specify one or more knowledge sources with per-source settings. Pass a JSON object or JSON array encoded as a string.
 
 **Supported Parameters by Source Type:**
 
@@ -281,8 +281,7 @@ Use `knowledge_source_configs` to specify one or more knowledge sources with per
 | `filterExpressionAddOn` | string | KQL filter expression for SharePoint-style sources |
 
 **Format Rules:**
-- Preferred: JSON object for one source, or JSON array for multiple sources
-- Compatibility: `knowledgeSourceName=ks-docs, kind=searchIndex, includeReferences=true`
+- Use a JSON object for one source, or a JSON array for multiple sources
 - **Note**: Search field selection is handled automatically by the API based on index configuration
 
 **Example Usage:**

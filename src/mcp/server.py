@@ -980,60 +980,22 @@ def _validate_knowledge_source_configs(sources: List[Dict[str, Any]]) -> None:
             raise ValueError(f"Missing required 'kind' in source config: {source}")
 
 
-# 解析旧版 key=value 配置，保留兼容性但不再作为推荐格式。
-def _parse_key_value_configs(config_str: str) -> List[Dict[str, Any]]:
-    source_entries = [entry.strip() for entry in config_str.split(";") if entry.strip()]
-    sources: List[Dict[str, Any]] = []
-
-    for entry in source_entries:
-        pairs = [pair.strip() for pair in entry.split(",") if pair.strip()]
-        source_config: Dict[str, Any] = {}
-
-        for pair in pairs:
-            if "=" not in pair:
-                raise ValueError(f"Invalid key-value pair: '{pair}'. Expected format: 'key=value'")
-
-            key, value = pair.split("=", 1)
-            key = key.strip()
-            value = value.strip()
-
-            if not key or not value:
-                raise ValueError(f"Empty key or value in pair: '{pair}'")
-
-            if value.lower() in ("true", "false"):
-                source_config[key] = value.lower() == "true"
-                continue
-
-            try:
-                source_config[key] = float(value) if "." in value else int(value)
-            except ValueError:
-                source_config[key] = value
-
-        sources.append(source_config)
-
-    _validate_knowledge_source_configs(sources)
-    return sources
-
-
-# 解析客户传入的知识源配置，推荐 JSON，旧的 key=value 字符串仍可使用。
+# 解析客户传入的知识源 JSON 配置，支持单个对象或对象数组。
 def _parse_knowledge_source_configs(config_str: str) -> List[Dict[str, Any]]:
     stripped = config_str.strip()
     if not stripped:
         return []
 
-    if stripped.startswith("[") or stripped.startswith("{"):
-        try:
-            parsed = json.loads(stripped)
-        except json.JSONDecodeError as exc:
-            raise ValueError(f"Invalid JSON knowledge_source_configs: {exc}") from exc
+    try:
+        parsed = json.loads(stripped)
+    except json.JSONDecodeError as exc:
+        raise ValueError("knowledge_source_configs must be a JSON object or JSON array.") from exc
 
-        sources = [parsed] if isinstance(parsed, dict) else parsed
-        if not isinstance(sources, list):
-            raise ValueError("JSON knowledge_source_configs must be an object or an array of objects.")
-        _validate_knowledge_source_configs(sources)
-        return sources
-
-    return _parse_key_value_configs(stripped)
+    sources = [parsed] if isinstance(parsed, dict) else parsed
+    if not isinstance(sources, list):
+        raise ValueError("knowledge_source_configs must be a JSON object or JSON array.")
+    _validate_knowledge_source_configs(sources)
+    return sources
 
 
 @mcp.tool(
