@@ -1,45 +1,56 @@
 # Azure AI Search MCP Server
 
-A Model Context Protocol (MCP) server that exposes Azure AI Search capabilities across multiple retrieval modes (keyword, semantic, vector, hybrid, plus Knowledge Base retrieval through the latest Python SDK preview APIs).
+A custom Model Context Protocol (MCP) server for exposing Azure AI Search retrieval capabilities to MCP-compatible clients.
+
+This server provides one customer-friendly tool layer for keyword search, semantic search, vector search, hybrid search, semantic hybrid search, and Azure AI Search Knowledge Base retrieval.
+
+## When To Use This
+
+Use this project when you want one MCP server that exposes multiple Azure AI Search retrieval modes behind a small, stable set of tools.
+
+Azure AI Search Knowledge Bases also expose a native MCP endpoint for direct Knowledge Base retrieval:
+
+```text
+https://<your-service-name>.search.windows.net/knowledgebases/<your-knowledge-base-name>/mcp?api-version=<api-version>
+```
+
+This native endpoint is available for Knowledge Base objects, not ordinary search indexes. Microsoft documents it in [Query a knowledge base using the retrieve action or MCP endpoint](https://learn.microsoft.com/azure/search/agentic-retrieval-how-to-retrieve#call-the-mcp-endpoint).
+
+If your client only needs Knowledge Base retrieval, the native endpoint can be enough. This project is useful when you also want direct access to traditional search modes such as keyword, semantic, vector, hybrid, and semantic hybrid retrieval.
 
 ## Features
-- Execute keyword searches using simple syntax.
-- Run semantic queries with optional captions and answers.
-- Perform pure vector similarity search.
-- Combine keyword and vector retrieval (hybrid search).
-- Apply semantic reranking on hybrid results for richer answers.
-- Call Azure AI Search Knowledge Base retrieval with `azure-search-documents` 12.1 preview SDK support.
-- Tune modern vector and hybrid retrieval settings such as oversampling, vector filter mode, filter overrides, semantic debug, and `hybridSearch.maxTextRecallSize`.
-- Support integrated vectorization when your index has an attached vectorizer (no manual embeddings required).
-- Tools read `AZURE_SEARCH_ENDPOINT` and key env vars at runtime. Traditional search tools use `AZURE_SEARCH_QUERY_KEY`, while the agentic tool uses `AZURE_SEARCH_ADMIN_KEY`.
+
+- Keyword search with filters, selected fields, and search field scoping.
+- Semantic search with semantic ranking, captions, and answers.
+- Vector search using integrated vectorization from an index vectorizer.
+- Hybrid search combining keyword and vector retrieval.
+- Semantic hybrid search with hybrid retrieval plus semantic reranking.
+- Knowledge Base retrieval through the Azure AI Search Python SDK preview client.
+- Focused tool parameters for common use, with low-frequency SDK tuning under `advanced_options`.
 
 ## Quick Start
 
-### Local Development
+### 1. Install
 
-**1/ Clone Repo**
 ```bash
 git clone https://github.com/HeyJiqingCode/AzureAISearchMCP.git
 cd AzureAISearchMCP
-```
 
-**2/ Install dependencies**:
-```bash
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-**3/ Create a `.env` file**
+### 2. Configure
+
+Create a `.env` file:
+
 ```bash
-# Azure AI Search Endpoint
 AZURE_SEARCH_ENDPOINT=https://your-search-service.search.windows.net
-
-# Azure AI Search Keys (QueryKey AdminKey)
 AZURE_SEARCH_QUERY_KEY=your-query-key
-AZURE_SEARCH_ADMIN_KEY=your-admin-key   # required for agentic_retrieval
+AZURE_SEARCH_ADMIN_KEY=your-admin-key
 
-# Server and timeout settings (Optional)
+# Optional
 # MCP_HOST=0.0.0.0
 # MCP_PORT=8000
 # AZURE_SEARCH_TIMEOUT=30
@@ -47,107 +58,106 @@ AZURE_SEARCH_ADMIN_KEY=your-admin-key   # required for agentic_retrieval
 # AZURE_SEARCH_AGENTIC_TIMEOUT_BUFFER=30
 ```
 
-**4/ Run the server**:
+Traditional search tools use `AZURE_SEARCH_QUERY_KEY`. The `agentic_retrieval` tool uses `AZURE_SEARCH_ADMIN_KEY`.
+
+### 3. Run
+
+For local MCP clients using stdio:
+
 ```bash
-# For stdio transport (default)
 python src/mcp/server.py
+```
 
-# For SSE transport
-python src/mcp/server.py --transport sse --host 0.0.0.0 --port 8000
+For Streamable HTTP:
 
-# For Streamable HTTP transport
+```bash
 python src/mcp/server.py --transport streamable-http --host 0.0.0.0 --port 8000
 ```
 
-Set `AZURE_SEARCH_ENDPOINT` in the environment or pass `--endpoint` when starting the server.
+For SSE:
 
-Timeout settings are split into two layers:
+```bash
+python src/mcp/server.py --transport sse --host 0.0.0.0 --port 8000
+```
 
-- `max_runtime_seconds` is a tool argument for `agentic_retrieval`. It asks Azure AI Search to stop the Knowledge Base retrieve operation after that many seconds.
-- `AZURE_SEARCH_AGENTIC_TIMEOUT` is how long this MCP server is willing to wait for Azure AI Search to respond.
-- `AZURE_SEARCH_AGENTIC_TIMEOUT_BUFFER` adds extra waiting time when `max_runtime_seconds` is set.
+You can set `AZURE_SEARCH_ENDPOINT` in the environment or pass `--endpoint` when starting the server.
+
+### 4. Connect an MCP Client
+
+Example Streamable HTTP configuration:
+
+```json
+{
+  "mcpServers": {
+    "AzureAISearch": {
+      "type": "streamableHttp",
+      "url": "http://127.0.0.1:8000/mcp"
+    }
+  }
+}
+```
+
+If the server is deployed behind a gateway or proxy that requires authentication, configure the required headers in your MCP client.
+
+## Configuration
+
+| Setting | Required | Used by | Description |
+| --- | --- | --- | --- |
+| `AZURE_SEARCH_ENDPOINT` | Yes | All tools | Azure AI Search service endpoint. |
+| `AZURE_SEARCH_QUERY_KEY` | Yes | Search tools | Query key for keyword, semantic, vector, hybrid, and semantic hybrid tools. |
+| `AZURE_SEARCH_ADMIN_KEY` | For Agentic | `agentic_retrieval` | Admin key used by Knowledge Base retrieval. Treat it as sensitive. |
+| `MCP_HOST` | No | HTTP transports | Host used by `http`, `streamable-http`, and `sse`. Default: `0.0.0.0`. |
+| `MCP_PORT` | No | HTTP transports | Port used by `http`, `streamable-http`, and `sse`. Default: `8000`. |
+| `AZURE_SEARCH_TIMEOUT` | No | Search tools | How long this MCP server waits for standard search calls. Default: `30`. |
+| `AZURE_SEARCH_AGENTIC_TIMEOUT` | No | `agentic_retrieval` | How long this MCP server waits for Agentic Retrieval calls. Default: `90`. |
+| `AZURE_SEARCH_AGENTIC_TIMEOUT_BUFFER` | No | `agentic_retrieval` | Extra wait time added when `max_runtime_seconds` is set. Default: `30`. |
+
+### Timeout Settings
+
+Standard search tools use `AZURE_SEARCH_TIMEOUT`.
+
+Agentic Retrieval uses two timeout layers:
+
+- `max_runtime_seconds`: a tool argument that asks Azure AI Search to stop the Knowledge Base retrieve operation after that many seconds.
+- `AZURE_SEARCH_AGENTIC_TIMEOUT`: how long this MCP server is willing to wait for Azure AI Search to respond.
+- `AZURE_SEARCH_AGENTIC_TIMEOUT_BUFFER`: extra waiting time added when `max_runtime_seconds` is set.
 
 Example: if `max_runtime_seconds=60` and `AZURE_SEARCH_AGENTIC_TIMEOUT_BUFFER=30`, this MCP server waits up to 90 seconds. This gives Azure AI Search 60 seconds to run, plus 30 seconds for network and response overhead.
 
-**5/ Add MCP Server to your client for Streamable HTTP**
-```json
-{
-  "mcpServers": {
-    "AzureAISearch": {
-      "type": "streamableHttp",
-      "url": "http://127.0.0.1:8000/mcp",
-      "headers": {
-         "Content-Type": "application/json",
-         "Authorization": "Bearer your_token"
-      }
-    }
-  }
-}
-```
+## Tools
 
-### Docker
+| Tool | Use when |
+| --- | --- |
+| `simple_search` | You need standard keyword or BM25 search. |
+| `semantic_search` | You need semantic ranking, captions, or answers from a semantic configuration. |
+| `vector_search` | You need vector-only similarity search using integrated vectorization. |
+| `hybrid_search` | You need keyword and vector retrieval in one query. |
+| `semantic_hybrid_search` | You need hybrid retrieval plus semantic reranking, captions, or answers. |
+| `agentic_retrieval` | You need Azure AI Search Knowledge Base / Agentic Retrieval. |
 
-**1/ Clone Repo**
-```bash
-git clone https://github.com/HeyJiqingCode/AzureAISearchMCP.git
-cd AzureAISearchMCP
-```
+Search tool responses include:
 
-**2/ Build Docker Image**
-```bash
-docker build -t azure-ai-search-mcp:2.0.0 -f Dockerfile .
-```
+- `documents`: normalized search results, including fields such as `@search.score` when returned.
+- `count`: total document count when available.
+- `answers`, `captions`, `facets`: included when returned by Azure AI Search.
+- `continuation_token`: included when the SDK reports a continuation token.
 
-**3/ Run the container**:
-```bash
-docker run -itd -p 8000:8000 --name AzureAISearch \
-  -e AZURE_SEARCH_ENDPOINT=https://your-search-service.search.windows.net \
-  -e AZURE_SEARCH_QUERY_KEY=your-query-key \
-  -e AZURE_SEARCH_ADMIN_KEY=your-admin-key \
-  -e MCP_HOST=0.0.0.0 \
-  -e MCP_PORT=8000 \
-  azure-ai-search-mcp:2.0.0
-```
-
-**4/ Add MCP Server for HTTP transport**
-```json
-{
-  "mcpServers": {
-    "AzureAISearch": {
-      "type": "streamableHttp",
-      "url": "http://127.0.0.1:8000/mcp",
-      "headers": {
-         "Content-Type": "application/json",
-         "Authorization": "Bearer your_token"
-      }
-    }
-  }
-}
-```
-
-## Available Tools
-
-Search tools expose common retrieval parameters at the top level. Low-frequency SDK tuning options go in `advanced_options` as a JSON object string. All responses include:
-- `documents`: list of normalized documents (with `@search.score`, etc.).
-- `count`: total number of documents matched (if available).
-- `answers`, `captions`, `facets`: when returned by the service.
-- `continuation_token`: set if further paging is available.
+## Tool Reference
 
 ### `simple_search`
 
-Keyword (BM25) search over an index using simple query syntax, with optional filters and field selection.
+Keyword search over an index using simple query syntax.
 
-**Parameters:**
+```text
+simple_search(index_name, query, top=5, skip=0, search_fields="", select="", filter="", search_mode="any", advanced_options="")
+```
 
-index_name, query, top=5, skip=0, search_fields=None, select=None, filter=None, search_mode="any", advanced_options=""
-
-**Example Usage:**
 ```json
 {
   "tool": "simple_search",
   "arguments": {
     "index_name": "knowledge-base",
-    "query": "How to config Wifi for Windows PC?",
+    "query": "How to configure Wi-Fi for Windows PC?",
     "top": 3,
     "select": "title,body"
   }
@@ -156,20 +166,18 @@ index_name, query, top=5, skip=0, search_fields=None, select=None, filter=None, 
 
 ### `semantic_search`
 
-Semantic reranked search returning optional captions and answers when the index has semantic configuration enabled.
+Semantic reranked search for indexes with semantic configuration enabled.
 
-**Parameters:**
-
-index_name, query, semantic_configuration, top=5, skip=0, select=None, filter=None, query_caption="extractive", query_caption_highlight_enabled=True, query_answer=None, advanced_options=""
-
-**Example Usage:**
+```text
+semantic_search(index_name, query, semantic_configuration, top=5, skip=0, select="", filter="", query_caption="extractive", query_caption_highlight_enabled=True, query_answer="", advanced_options="")
+```
 
 ```json
 {
   "tool": "semantic_search",
   "arguments": {
     "index_name": "knowledge-base",
-    "query": "How to config Wifi for Windows PC?",
+    "query": "How to configure Wi-Fi for Windows PC?",
     "semantic_configuration": "default",
     "top": 3
   }
@@ -178,13 +186,11 @@ index_name, query, semantic_configuration, top=5, skip=0, select=None, filter=No
 
 ### `vector_search`
 
-Vector-only similarity search using integrated vectorization (text-to-embedding) over specified vector fields.
+Vector-only similarity search using integrated vectorization.
 
-**Parameters:**
-
-index_name, vector_fields, vector_text, k=10, select=None, filter=None, advanced_options=""
-
-**Example Usage:**
+```text
+vector_search(index_name, vector_fields, vector_text, k=10, select="", filter="", advanced_options="")
+```
 
 ```json
 {
@@ -192,7 +198,7 @@ index_name, vector_fields, vector_text, k=10, select=None, filter=None, advanced
   "arguments": {
     "index_name": "knowledge-base",
     "vector_fields": "text_vector",
-    "vector_text": "How to config Wifi for Windows PC?",
+    "vector_text": "How to configure Wi-Fi for Windows PC?",
     "k": 5,
     "select": "title,summary"
   }
@@ -201,125 +207,116 @@ index_name, vector_fields, vector_text, k=10, select=None, filter=None, advanced
 
 ### `hybrid_search`
 
-Hybrid (keyword + vector) search that fuses BM25 and vector similarity results using Reciprocal Rank Fusion.
+Hybrid keyword and vector search using Reciprocal Rank Fusion.
 
-**Parameters:**
-
-index_name, query, vector_fields, vector_text, k=10, top=10, select=None, filter=None, search_fields=None, advanced_options=""
-
-**Example Usage:**
+```text
+hybrid_search(index_name, query, vector_fields, vector_text, k=10, top=10, select="", filter="", search_fields="", advanced_options="")
+```
 
 ```json
 {
   "tool": "hybrid_search",
   "arguments": {
     "index_name": "knowledge-base",
-    "query": "How to config Wifi for Windows PC?",
+    "query": "How to configure Wi-Fi for Windows PC?",
     "vector_fields": "text_vector",
-    "vector_text": "How to config Wifi for Windows PC?",
+    "vector_text": "How to configure Wi-Fi for Windows PC?",
     "k": 20,
     "top": 5,
-    "search_fields": "title,body",
-    "advanced_options": "{\"max_text_recall_size\":100,\"vector_filter_mode\":\"preFilter\"}"
+    "search_fields": "title,body"
   }
 }
 ```
 
 ### `semantic_hybrid_search`
 
-Hybrid (keyword + vector) search with semantic reranking, captions, and answers when configured.
+Hybrid retrieval with semantic reranking, captions, and answers.
 
-**Parameters:**
-
-index_name, query, vector_fields, semantic_configuration, vector_text, k=50, top=10, select=None, filter=None, search_fields=None, query_caption="extractive", query_caption_highlight_enabled=True, query_answer=None, advanced_options=""
-
-**Example Usage:**
+```text
+semantic_hybrid_search(index_name, query, vector_fields, semantic_configuration, vector_text, k=50, top=10, select="", filter="", search_fields="", query_caption="extractive", query_caption_highlight_enabled=True, query_answer="", advanced_options="")
+```
 
 ```json
 {
   "tool": "semantic_hybrid_search",
   "arguments": {
     "index_name": "knowledge-base",
-    "query": "How to config Wifi for Windows PC?",
+    "query": "How to configure Wi-Fi for Windows PC?",
     "vector_fields": "text_vector",
     "semantic_configuration": "default",
-    "vector_text": "How to config Wifi for Windows PC?",
+    "vector_text": "How to configure Wi-Fi for Windows PC?",
     "k": 30,
     "top": 5,
     "query_caption": "extractive",
-    "query_answer": "extractive",
-    "advanced_options": "{\"max_text_recall_size\":100,\"semantic_error_mode\":\"partial\"}"
+    "query_answer": "extractive"
   }
 }
 ```
 
 ### `advanced_options`
 
-`advanced_options` is a JSON object string. Unsupported keys are rejected so accidental SDK passthrough does not hide mistakes.
+`advanced_options` is a JSON object string for less common SDK tuning settings. Unsupported keys are rejected.
 
 Common keys:
-`debug`
+
+```text
+debug
+```
 
 Semantic keys:
-`semantic_query`, `query_answer_count`, `query_answer_threshold`, `semantic_error_mode`, `semantic_max_wait_in_milliseconds`
+
+```text
+semantic_query, query_answer_count, query_answer_threshold, semantic_error_mode, semantic_max_wait_in_milliseconds
+```
 
 Vector keys:
-`exhaustive`, `weight`, `oversampling`, `filter_override`, `vector_filter_mode`, `vector_similarity_threshold`, `search_score_threshold`
+
+```text
+exhaustive, weight, oversampling, filter_override, vector_filter_mode, vector_similarity_threshold, search_score_threshold
+```
 
 Hybrid keys:
-`max_text_recall_size`, `count_and_facet_mode`
 
-### `agentic_retrieval`
+```text
+max_text_recall_size, count_and_facet_mode
+```
 
-Run Azure AI Search Knowledge Base retrieval through the Python SDK preview client. Requires `AZURE_SEARCH_ADMIN_KEY`.
+Example:
 
-**Parameters (frequently used):**
+```json
+{
+  "advanced_options": "{\"max_text_recall_size\":100,\"vector_filter_mode\":\"preFilter\"}"
+}
+```
 
-- `knowledge_base_name` (str, required)
-- `query` (str, required)
-- `intent_query` (Optional[str]) – direct semantic intent; this uses intent-based retrieval
-- `reasoning_effort` (str) – `minimal`, `low`, or `medium`; default is `low`
-- `output_mode` (str) – `answerSynthesis` or `extractedData`; default is `answerSynthesis`
-- `include_activity` (bool)
-- `max_runtime_seconds`, `max_output_size`, `max_output_documents` (Optional[int])
-- `knowledge_source_configs` (Optional[str]) – JSON string for configuring one or more knowledge sources.
-- `query_source_authorization` (Optional[str]) – end-user token for query-time permission enforcement
+## Agentic Retrieval
 
-`answerSynthesis` requires message-based retrieval (`low` or `medium`). Use `reasoning_effort="minimal"` with `output_mode="extractedData"` for direct semantic intent retrieval.
+`agentic_retrieval` runs Azure AI Search Knowledge Base retrieval through the Python SDK preview client.
 
-Timeouts use two layers:
+```text
+agentic_retrieval(knowledge_base_name, query, intent_query="", reasoning_effort="low", output_mode="answerSynthesis", include_activity=True, max_runtime_seconds=0, max_output_size=0, max_output_documents=0, knowledge_source_configs="", query_source_authorization="")
+```
 
-- `max_runtime_seconds`: per-call Azure AI Search limit. Use this when the caller wants to cap how long Knowledge Base retrieval may run in Azure.
-- `AZURE_SEARCH_AGENTIC_TIMEOUT`: server-wide MCP wait limit. Use this as a safety guard so this MCP server does not wait forever.
-- `AZURE_SEARCH_AGENTIC_TIMEOUT_BUFFER`: extra wait time added on top of `max_runtime_seconds`.
+Frequently used arguments:
 
-Recommended starting point: leave `AZURE_SEARCH_AGENTIC_TIMEOUT=90` and `AZURE_SEARCH_AGENTIC_TIMEOUT_BUFFER=30`. For slower answer synthesis or multi-source retrieval, pass `max_runtime_seconds` on the tool call and increase the env values only if the MCP server still times out first.
+| Argument | Description |
+| --- | --- |
+| `knowledge_base_name` | Azure AI Search Knowledge Base name. |
+| `query` | User question or retrieval query. |
+| `reasoning_effort` | `minimal`, `low`, or `medium`. Default: `low`. |
+| `output_mode` | `answerSynthesis` or `extractedData`. Default: `answerSynthesis`. |
+| `include_activity` | Include query planning and retrieval activity details. |
+| `max_runtime_seconds` | Ask Azure AI Search to cap service-side retrieval runtime. |
+| `max_output_size` | Bound the grounded response payload size. |
+| `max_output_documents` | Cap final grounding document count. |
+| `knowledge_source_configs` | JSON object or JSON array string for runtime knowledge source settings. |
+| `query_source_authorization` | End-user token for query-time permission enforcement. |
 
-**Knowledge Source Configuration:**
+`answerSynthesis` requires message-based retrieval, so use `reasoning_effort="low"` or `reasoning_effort="medium"`. Use `reasoning_effort="minimal"` with `output_mode="extractedData"` for direct semantic intent retrieval.
 
-Use `knowledge_source_configs` to specify one or more knowledge sources with per-source settings. Pass a JSON object or JSON array encoded as a string.
+Response includes a convenience `answer`, formatted `references`, the SDK response fields (`response`, `activity`, `raw_references`, `metadata`), and the normalized SDK request body used for the call.
 
-**Supported Parameters by Source Type:**
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `knowledgeSourceName` | string | Knowledge source name |
-| `kind` | string | Source type, such as `searchIndex`, `web`, `azureBlob`, `indexedOneLake`, or preview kinds supported by the SDK |
-| `includeReferences` | bool | Include document references |
-| `includeReferenceSourceData` | bool | Include source data in references |
-| `rerankerThreshold` | float | Minimum reranker score threshold |
-| `alwaysQuerySource` | bool | Force querying when supported by the selected source kind |
-| `failOnError` | bool | Treat this source as required |
-| `maxOutputDocuments` | int | Cap candidate documents from this source |
-| `filterAddOn` | string | Runtime OData filter for search index knowledge sources |
-| `count`, `freshness`, `language`, `market` | mixed | Web source controls |
-| `filterExpressionAddOn` | string | KQL filter expression for SharePoint-style sources |
-
-**Format Rules:**
-- Use a JSON object for one source, or a JSON array for multiple sources
-- **Note**: Search field selection is handled automatically by the API based on index configuration
-
-**Example Usage:**
+### Basic Example
 
 ```json
 {
@@ -329,13 +326,12 @@ Use `knowledge_source_configs` to specify one or more knowledge sources with per
     "query": "How do I reset my VPN password?",
     "reasoning_effort": "low",
     "output_mode": "answerSynthesis",
-    "include_activity": true,
-    "knowledge_source_configs": "{\"knowledgeSourceName\":\"ks-docs\",\"kind\":\"searchIndex\",\"includeReferences\":true}"
+    "include_activity": true
   }
 }
 ```
 
-**Minimal intent example:**
+### Minimal Intent Example
 
 ```json
 {
@@ -344,13 +340,45 @@ Use `knowledge_source_configs` to specify one or more knowledge sources with per
     "knowledge_base_name": "kb-support",
     "query": "How do I reset my VPN password?",
     "reasoning_effort": "minimal",
-    "output_mode": "extractedData",
+    "output_mode": "extractedData"
+  }
+}
+```
+
+### Knowledge Source Configuration
+
+Use `knowledge_source_configs` to specify one or more knowledge sources with per-source settings. Pass a JSON object or JSON array encoded as a string.
+
+Common knowledge source config keys:
+
+| Key | Type | Description |
+| --- | --- | --- |
+| `knowledgeSourceName` | string | Knowledge source name. |
+| `kind` | string | Source type, such as `searchIndex`, `web`, `azureBlob`, `indexedOneLake`, or another preview kind supported by the SDK. |
+| `includeReferences` | bool | Include document references. |
+| `includeReferenceSourceData` | bool | Include source data in references. |
+| `rerankerThreshold` | float | Minimum reranker score threshold. |
+| `alwaysQuerySource` | bool | Force querying when supported by the selected source kind. |
+| `failOnError` | bool | Treat this source as required. |
+| `maxOutputDocuments` | int | Cap candidate documents from this source. |
+| `filterAddOn` | string | Runtime OData filter for search index knowledge sources. |
+| `count`, `freshness`, `language`, `market` | mixed | Web source controls. |
+| `filterExpressionAddOn` | string | KQL filter expression for SharePoint-style sources. |
+
+Single source:
+
+```json
+{
+  "tool": "agentic_retrieval",
+  "arguments": {
+    "knowledge_base_name": "kb-support",
+    "query": "How do I reset my VPN password?",
     "knowledge_source_configs": "{\"knowledgeSourceName\":\"ks-docs\",\"kind\":\"searchIndex\",\"includeReferences\":true}"
   }
 }
 ```
 
-**Multiple sources example:**
+Multiple sources:
 
 ```json
 {
@@ -363,7 +391,27 @@ Use `knowledge_source_configs` to specify one or more knowledge sources with per
 }
 ```
 
-Response includes a convenience `answer`, formatted `references`, the SDK response fields (`response`, `activity`, `raw_references`, `metadata`), and the normalized SDK request body used for the call.
+Search field selection is handled by Azure AI Search based on Knowledge Base and index configuration.
+
+## Docker
+
+Build the image:
+
+```bash
+docker build -t azure-ai-search-mcp:2.0.0 -f Dockerfile .
+```
+
+Run the container:
+
+```bash
+docker run -itd -p 8000:8000 --name AzureAISearch \
+  -e AZURE_SEARCH_ENDPOINT=https://your-search-service.search.windows.net \
+  -e AZURE_SEARCH_QUERY_KEY=your-query-key \
+  -e AZURE_SEARCH_ADMIN_KEY=your-admin-key \
+  -e MCP_HOST=0.0.0.0 \
+  -e MCP_PORT=8000 \
+  azure-ai-search-mcp:2.0.0
+```
 
 ## More Details
 
