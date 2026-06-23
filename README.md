@@ -254,7 +254,7 @@ Run Azure AI Search Knowledge Base retrieval through the Python SDK preview clie
 - `output_mode` (str) – `answerSynthesis` or `extractedData`; default is `answerSynthesis`
 - `include_activity` (bool)
 - `max_runtime_seconds`, `max_output_size`, `max_output_documents` (Optional[int])
-- `knowledge_source_configs` (Optional[str]) – Key-value format for configuring knowledge sources. Format: `"knowledgeSourceName=name, kind=type, param=value; knowledgeSourceName=name2, ..."`. Each source can be independently configured with type-specific parameters.
+- `knowledge_source_configs` (Optional[str]) – JSON string for configuring one or more knowledge sources. The older `key=value` format is still accepted for compatibility.
 - `query_source_authorization` (Optional[str]) – end-user token for query-time permission enforcement
 - `api_key`, `endpoint`
 
@@ -262,7 +262,7 @@ Run Azure AI Search Knowledge Base retrieval through the Python SDK preview clie
 
 **Knowledge Source Configuration:**
 
-Use `knowledge_source_configs` to specify one or more knowledge sources with per-source settings. Parameters can be in **any order** - the parser is order-independent.
+Use `knowledge_source_configs` to specify one or more knowledge sources with per-source settings. Prefer a JSON object or JSON array encoded as a string.
 
 **Supported Parameters by Source Type:**
 
@@ -281,10 +281,8 @@ Use `knowledge_source_configs` to specify one or more knowledge sources with per
 | `filterExpressionAddOn` | string | KQL filter expression for SharePoint-style sources |
 
 **Format Rules:**
-- Parameters can be specified in **any order**
-- Use `,` to separate key-value pairs within a source
-- Use `;` to separate multiple sources
-- Boolean values: `true` or `false` (lowercase)
+- Preferred: JSON object for one source, or JSON array for multiple sources
+- Compatibility: `knowledgeSourceName=ks-docs, kind=searchIndex, includeReferences=true`
 - **Note**: Search field selection is handled automatically by the API based on index configuration
 
 **Example Usage:**
@@ -298,7 +296,7 @@ Use `knowledge_source_configs` to specify one or more knowledge sources with per
     "reasoning_effort": "low",
     "output_mode": "answerSynthesis",
     "include_activity": true,
-    "knowledge_source_configs": "knowledgeSourceName=ks-docs, kind=searchIndex, includeReferences=true"
+    "knowledge_source_configs": "{\"knowledgeSourceName\":\"ks-docs\",\"kind\":\"searchIndex\",\"includeReferences\":true}"
   }
 }
 ```
@@ -313,7 +311,7 @@ Use `knowledge_source_configs` to specify one or more knowledge sources with per
     "query": "How do I reset my VPN password?",
     "reasoning_effort": "minimal",
     "output_mode": "extractedData",
-    "knowledge_source_configs": "knowledgeSourceName=ks-docs, kind=searchIndex, includeReferences=true"
+    "knowledge_source_configs": "{\"knowledgeSourceName\":\"ks-docs\",\"kind\":\"searchIndex\",\"includeReferences\":true}"
   }
 }
 ```
@@ -326,7 +324,7 @@ Use `knowledge_source_configs` to specify one or more knowledge sources with per
   "arguments": {
     "knowledge_base_name": "kb-support",
     "query": "Latest security updates",
-    "knowledge_source_configs": "knowledgeSourceName=ks-docs, kind=searchIndex, includeReferences=true; knowledgeSourceName=ks-web, kind=web, count=10, freshness=week"
+    "knowledge_source_configs": "[{\"knowledgeSourceName\":\"ks-docs\",\"kind\":\"searchIndex\",\"includeReferences\":true},{\"knowledgeSourceName\":\"ks-web\",\"kind\":\"web\",\"count\":10,\"freshness\":\"week\"}]"
   }
 }
 ```
