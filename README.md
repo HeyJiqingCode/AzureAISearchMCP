@@ -42,7 +42,9 @@ AZURE_SEARCH_ADMIN_KEY=your-admin-key   # required for agentic_retrieval
 # Server and timeout settings (Optional)
 # MCP_HOST=0.0.0.0
 # MCP_PORT=8000
-# AZURE_SEARCH_TIMEOUT=120
+# AZURE_SEARCH_TIMEOUT=30
+# AZURE_SEARCH_AGENTIC_TIMEOUT=90
+# AZURE_SEARCH_AGENTIC_TIMEOUT_BUFFER=30
 ```
 
 **4/ Run the server**:
@@ -58,6 +60,11 @@ python src/mcp/server.py --transport streamable-http --host 0.0.0.0 --port 8000
 ```
 
 Set `AZURE_SEARCH_ENDPOINT` in the environment or pass `--endpoint` when starting the server.
+
+`AZURE_SEARCH_TIMEOUT` is the default client-side SDK timeout for standard search tools.
+`AZURE_SEARCH_AGENTIC_TIMEOUT` is the client-side safety budget for `agentic_retrieval`.
+When a request sets `max_runtime_seconds`, the server uses the larger value of
+`AZURE_SEARCH_AGENTIC_TIMEOUT` and `max_runtime_seconds + AZURE_SEARCH_AGENTIC_TIMEOUT_BUFFER`.
 
 **5/ Add MCP Server to your client for Streamable HTTP**
 ```json
@@ -276,6 +283,8 @@ Run Azure AI Search Knowledge Base retrieval through the Python SDK preview clie
 - `query_source_authorization` (Optional[str]) – end-user token for query-time permission enforcement
 
 `answerSynthesis` requires message-based retrieval (`low` or `medium`). Use `reasoning_effort="minimal"` with `output_mode="extractedData"` for direct semantic intent retrieval.
+
+`max_runtime_seconds` maps to Azure AI Search `maxRuntimeInSeconds`, which caps service-side processing latency for the retrieve request. The `AZURE_SEARCH_AGENTIC_TIMEOUT` and `AZURE_SEARCH_AGENTIC_TIMEOUT_BUFFER` environment variables are still useful as MCP client-side guards for SDK transport delays, retries, network stalls, or unexpectedly long responses.
 
 **Knowledge Source Configuration:**
 

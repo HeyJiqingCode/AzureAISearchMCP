@@ -1090,7 +1090,10 @@ async def agentic_retrieval(
 
     try:
         async with client:
-            retrieve_kwargs: Dict[str, Any] = {"retrieval_request": request}
+            retrieve_kwargs: Dict[str, Any] = {
+                "retrieval_request": request,
+                "timeout": timeout_budget,
+            }
             if query_source_authorization:
                 retrieve_kwargs["query_source_authorization"] = query_source_authorization
             result = await asyncio.wait_for(
