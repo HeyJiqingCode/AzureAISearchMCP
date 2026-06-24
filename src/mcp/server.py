@@ -621,7 +621,7 @@ def _build_agentic_response(
     response: Dict[str, Any] = {
         "answer": {
             "text": answer_text,
-            "citation_markers": [f"ref_id:{ref_id}" for ref_id in reference_ids],
+            "used_ref_ids": reference_ids,
         },
         "references": _select_referenced_sources(normalized_references, reference_ids),
         "metadata": {

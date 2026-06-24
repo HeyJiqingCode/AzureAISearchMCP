@@ -317,7 +317,7 @@ Frequently used arguments:
 
 Response is structured for agent consumption:
 
-- `answer`: object containing `text` and `citation_markers`. The answer text keeps Azure AI Search citation markers such as `[ref_id:0]`.
+- `answer`: object containing `text` and `used_ref_ids`. The answer text keeps Azure AI Search citation markers such as `[ref_id:0]`; `used_ref_ids` lists the cited reference IDs without the `ref_id:` prefix.
 - `references`: normalized evidence objects referenced by `answer.text`, with fields such as `ref_id`, `source_type`, `title`, `url`, `content`, `document_id`, `chunk_id`, `doc_key`, `knowledge_source_name`, `activity_source`, and `reranker_score`.
 - `metadata`: request and retrieval metadata such as `knowledge_base_name`, `output_mode`, `reasoning_effort`, `elapsed_ms`, `referenced_count`, and `total_reference_count`.
 - `diagnostics`: included only when `include_diagnostics=true`; contains the normalized SDK request, timeout budget, raw response, raw references, and activity details.
