@@ -142,6 +142,12 @@ Search tool responses include:
 - `answers`, `captions`, `facets`: included when returned by Azure AI Search.
 - `continuation_token`: included when the SDK reports a continuation token.
 
+## Agent Skill Guide
+
+This repo includes an optional agent-facing guide at `skills/azure-ai-search-mcp/SKILL.md`.
+
+Use it when an MCP client or agent should guide users interactively through available search capabilities, required parameters, advanced options, and Agentic Retrieval source-data settings.
+
 ## Tool Reference
 
 ### `simple_search`
@@ -381,7 +387,7 @@ Single source:
   "arguments": {
     "knowledge_base_name": "kb-support",
     "query": "How do I reset my VPN password?",
-    "knowledge_source_configs": "{\"knowledgeSourceName\":\"ks-docs\",\"kind\":\"searchIndex\",\"includeReferences\":true}"
+    "knowledge_source_configs": "{\"knowledgeSourceName\":\"ks-docs\",\"kind\":\"searchIndex\",\"includeReferences\":true,\"includeReferenceSourceData\":true}"
   }
 }
 ```
@@ -394,7 +400,7 @@ Multiple sources:
   "arguments": {
     "knowledge_base_name": "kb-support",
     "query": "Latest security updates",
-    "knowledge_source_configs": "[{\"knowledgeSourceName\":\"ks-docs\",\"kind\":\"searchIndex\",\"includeReferences\":true},{\"knowledgeSourceName\":\"ks-web\",\"kind\":\"web\",\"count\":10,\"freshness\":\"week\"}]"
+    "knowledge_source_configs": "[{\"knowledgeSourceName\":\"ks-docs\",\"kind\":\"searchIndex\",\"includeReferences\":true,\"includeReferenceSourceData\":true},{\"knowledgeSourceName\":\"ks-web\",\"kind\":\"web\",\"includeReferences\":true,\"count\":10,\"freshness\":\"week\"}]"
   }
 }
 ```
