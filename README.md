@@ -426,7 +426,3 @@ docker run -itd -p 8000:8000 --name AzureAISearch \
   -e MCP_PORT=8000 \
   azure-ai-search-mcp:2.0.0
 ```
-
-## More Details
-
-See [MCP Server for Azure AI Search](https://heyjiqing.notion.site/MCP-Server-for-Azure-AI-Search-294de7b6e4e8805faccad1f60cc255e2?pvs=74)
