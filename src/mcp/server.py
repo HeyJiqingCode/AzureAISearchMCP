@@ -492,76 +492,98 @@ def _build_reasoning_effort(reasoning_effort: Optional[str]) -> Optional[Any]:
     raise ValueError("reasoning_effort must be one of: minimal, low, medium")
 
 
-def _format_agentic_response(raw_response: Dict[str, Any]) -> Dict[str, Any]:
-    """整理 Knowledge Base Retrieval 响应，同时保留原始结构。"""
+# 提取 Agentic Retrieval 的主答案文本，保持服务端原始引用标记不变。
+def _extract_agentic_answer_text(raw_response: Dict[str, Any]) -> str:
     try:
-        answer_text = raw_response["response"][0]["content"][0]["text"]
+        return raw_response["response"][0]["content"][0]["text"]
     except (KeyError, IndexError, TypeError):
-        answer_text = ""
+        return ""
 
-    def replace_ref(match):
-        ref_id = int(match.group(1))
-        superscript_num = ref_id + 1
-        return f"<sup>{superscript_num}</sup>"
 
-    formatted_answer = re.sub(r'\[ref_id:(\d+)\]', replace_ref, answer_text)
+# 收集答案中的引用标记，便于 Agent 对齐答案和 citations。
+def _extract_citation_markers(answer_text: str) -> List[str]:
+    return [f"ref_id:{match}" for match in re.findall(r"\[ref_id:(\d+)\]", answer_text)]
 
-    activity_map = {}
-    activities = raw_response.get("activity", [])
+
+# 读取 SDK 响应里的列表字段，避免 preview 字段返回 null 时影响 MCP 输出。
+def _list_or_empty(value: Any) -> List[Any]:
+    return value if isinstance(value, list) else []
+
+
+# 建立 retrieval activity 到知识源名称的映射，补齐 citation 上下文。
+def _build_activity_source_map(activities: List[Any]) -> Dict[Any, str]:
+    activity_map: Dict[Any, str] = {}
     for activity in activities:
+        if not isinstance(activity, dict):
+            continue
         activity_id = activity.get("id")
-        knowledge_source_name = activity.get("knowledgeSourceName")
+        knowledge_source_name = activity.get("knowledgeSourceName") or activity.get("knowledge_source_name")
         if activity_id is not None and knowledge_source_name:
             activity_map[activity_id] = knowledge_source_name
+    return activity_map
 
-    references = raw_response.get("references", [])
-    formatted_refs = []
 
-    for ref in references:
-        ref_type = ref.get("type", "")
-        ref_id = ref.get("id", "")
-        activity_source = ref.get("activitySource")
+# 归一化单条引用为 Agent 更容易消费的结构化 citation。
+def _normalize_agentic_citation(ref: Dict[str, Any], activity_map: Dict[Any, str]) -> Dict[str, Any]:
+    ref_id = ref.get("id")
+    display_index = None
+    try:
+        display_index = int(ref_id) + 1
+    except (ValueError, TypeError):
+        pass
 
-        # Convert ID from 0-based to 1-based
-        try:
-            display_id = int(ref_id) + 1
-        except (ValueError, TypeError):
-            display_id = ref_id
-
-        # Get knowledge source name from activity
-        knowledge_source_name = activity_map.get(activity_source, "Unknown")
-
-        if ref_type == "web":
-            title = ref.get("title", "Untitled")
-            url = ref.get("url", "")
-            formatted_refs.append(f"{display_id}. [Web] [{title}]({url})")
-
-        elif ref_type in ["searchIndex", "remoteSharePoint", "azureBlob", "indexedOneLake"]:
-            title = ref.get("title", "Untitled")
-            reranker_score = ref.get("rerankerScore")
-            score_text = f"{reranker_score:.2f}" if isinstance(reranker_score, (int, float)) else "n/a"
-            formatted_refs.append(
-                f"{display_id}. [KnowledgeBase: {knowledge_source_name}] [rerankerScore: {score_text}] Title: {title}"
-            )
-        else:
-            formatted_refs.append(f"{display_id}. [Unknown Type: {ref_type}]")
-
-    def _reference_sort_key(value: str) -> int:
-        try:
-            return int(value.split(".", 1)[0])
-        except (ValueError, IndexError):
-            return 0
-
-    formatted_refs.sort(key=_reference_sort_key)
-
-    return {
-        "answer": formatted_answer,
-        "references": formatted_refs,
-        "response": raw_response.get("response", []),
-        "activity": raw_response.get("activity", []),
-        "raw_references": raw_response.get("references", []),
-        "metadata": raw_response.get("metadata", {}),
+    activity_source = ref.get("activitySource") or ref.get("activity_source")
+    citation: Dict[str, Any] = {
+        "id": ref_id,
+        "display_index": display_index,
+        "source_type": ref.get("type") or ref.get("source_type"),
+        "title": ref.get("title"),
+        "url": ref.get("url"),
+        "knowledge_source_name": activity_map.get(activity_source),
+        "activity_source": activity_source,
+        "reranker_score": ref.get("rerankerScore", ref.get("reranker_score")),
     }
+
+    source_data = ref.get("sourceData", ref.get("source_data"))
+    if source_data is not None:
+        citation["source_data"] = source_data
+
+    return {key: value for key, value in citation.items() if value is not None}
+
+
+# 构造面向 Agent 的 Knowledge Base Retrieval 返回，不混入展示层格式。
+def _build_agentic_response(
+    raw_response: Dict[str, Any],
+    *,
+    diagnostics: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    answer_text = _extract_agentic_answer_text(raw_response)
+    activities = _list_or_empty(raw_response.get("activity"))
+    references = _list_or_empty(raw_response.get("references"))
+    metadata = raw_response.get("metadata")
+    activity_map = _build_activity_source_map(activities)
+
+    response: Dict[str, Any] = {
+        "answer": {
+            "text": answer_text,
+            "citation_markers": _extract_citation_markers(answer_text),
+        },
+        "citations": [
+            _normalize_agentic_citation(ref, activity_map)
+            for ref in references
+            if isinstance(ref, dict)
+        ],
+        "response": _list_or_empty(raw_response.get("response")),
+        "references": references,
+        "activity": activities,
+        "metadata": metadata if isinstance(metadata, dict) else {},
+    }
+
+    if diagnostics:
+        response["diagnostics"] = diagnostics
+
+    return response
+
 
 @mcp.tool(
     name="simple_search",
@@ -1028,6 +1050,7 @@ async def agentic_retrieval(
     max_output_documents: int = 0,
     knowledge_source_configs: str = "",
     query_source_authorization: str = "",
+    include_diagnostics: bool = False,
 ) -> Dict[str, Any]:
     """调用 Azure AI Search Knowledge Base Retrieval SDK。"""
     intent_query = _none_if_empty(intent_query)
@@ -1101,9 +1124,13 @@ async def agentic_retrieval(
                 timeout=timeout_budget,
             )
         raw_data = _to_plain_data(result)
-        formatted_data = _format_agentic_response(raw_data)
-        formatted_data["request"] = request.as_dict()
-        return formatted_data
+        diagnostics = None
+        if include_diagnostics:
+            diagnostics = {
+                "request": request.as_dict(),
+                "timeout_budget_seconds": timeout_budget,
+            }
+        return _build_agentic_response(raw_data, diagnostics=diagnostics)
     except HttpResponseError as exc:
         raise RuntimeError(f"Agentic retrieval failed ({_http_status_code(exc)}): {exc.message}") from exc
     except asyncio.TimeoutError as exc:

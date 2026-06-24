@@ -294,7 +294,7 @@ Example:
 `agentic_retrieval` runs Azure AI Search Knowledge Base retrieval through the Python SDK preview client.
 
 ```text
-agentic_retrieval(knowledge_base_name, query, intent_query="", reasoning_effort="low", output_mode="answerSynthesis", include_activity=True, max_runtime_seconds=0, max_output_size=0, max_output_documents=0, knowledge_source_configs="", query_source_authorization="")
+agentic_retrieval(knowledge_base_name, query, intent_query="", reasoning_effort="low", output_mode="answerSynthesis", include_activity=True, max_runtime_seconds=0, max_output_size=0, max_output_documents=0, knowledge_source_configs="", query_source_authorization="", include_diagnostics=False)
 ```
 
 Frequently used arguments:
@@ -311,10 +311,16 @@ Frequently used arguments:
 | `max_output_documents` | Cap final grounding document count. |
 | `knowledge_source_configs` | JSON object or JSON array string for runtime knowledge source settings. |
 | `query_source_authorization` | End-user token for query-time permission enforcement. |
+| `include_diagnostics` | Include normalized request details and timeout budget for troubleshooting. Default: `false`. |
 
 `answerSynthesis` requires message-based retrieval, so use `reasoning_effort="low"` or `reasoning_effort="medium"`. Use `reasoning_effort="minimal"` with `output_mode="extractedData"` for direct semantic intent retrieval.
 
-Response includes a convenience `answer`, formatted `references`, the SDK response fields (`response`, `activity`, `raw_references`, `metadata`), and the normalized SDK request body used for the call.
+Response is structured for agent consumption:
+
+- `answer`: object containing `text` and `citation_markers`. The answer text keeps Azure AI Search citation markers such as `[ref_id:0]`.
+- `citations`: normalized citation objects with fields such as `id`, `display_index`, `source_type`, `title`, `url`, `knowledge_source_name`, `activity_source`, and `reranker_score`.
+- `response`, `references`, `activity`, `metadata`: SDK response fields converted to plain JSON.
+- `diagnostics`: included only when `include_diagnostics=true`.
 
 ### Basic Example
 
