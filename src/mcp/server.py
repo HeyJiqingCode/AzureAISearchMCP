@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import sys
+import time
 from argparse import ArgumentParser
 from typing import Any, Dict, Final, List, Optional, Tuple
 
@@ -500,9 +501,15 @@ def _extract_agentic_answer_text(raw_response: Dict[str, Any]) -> str:
         return ""
 
 
-# 收集答案中的引用标记，便于 Agent 对齐答案和 citations。
-def _extract_citation_markers(answer_text: str) -> List[str]:
-    return [f"ref_id:{match}" for match in re.findall(r"\[ref_id:(\d+)\]", answer_text)]
+# 收集答案中的唯一引用 ID，保持答案中首次出现的顺序。
+def _extract_reference_ids(answer_text: str) -> List[str]:
+    reference_ids: List[str] = []
+    seen: set[str] = set()
+    for match in re.findall(r"\[ref_id:(\d+)\]", answer_text):
+        if match not in seen:
+            reference_ids.append(match)
+            seen.add(match)
+    return reference_ids
 
 
 # 读取 SDK 响应里的列表字段，避免 preview 字段返回 null 时影响 MCP 输出。
@@ -523,60 +530,106 @@ def _build_activity_source_map(activities: List[Any]) -> Dict[Any, str]:
     return activity_map
 
 
-# 归一化单条引用为 Agent 更容易消费的结构化 citation。
-def _normalize_agentic_citation(ref: Dict[str, Any], activity_map: Dict[Any, str]) -> Dict[str, Any]:
-    ref_id = ref.get("id")
-    display_index = None
-    try:
-        display_index = int(ref_id) + 1
-    except (ValueError, TypeError):
-        pass
+# 提取 sourceData 中最常见的正文片段，兼容 Search Index 和 Work IQ 等来源。
+def _extract_source_content(source_data: Any) -> Optional[str]:
+    if not isinstance(source_data, dict):
+        return None
 
+    for key in ("content", "chunk", "text", "fabricAnswer"):
+        value = source_data.get(key)
+        if isinstance(value, str) and value:
+            return value
+
+    extracts = source_data.get("extracts")
+    if isinstance(extracts, list):
+        texts = [item.get("text") for item in extracts if isinstance(item, dict) and item.get("text")]
+        if texts:
+            return "\n\n".join(texts)
+
+    return None
+
+
+# 读取 sourceData 中常见标识字段，避免 Agent 再解析原始响应。
+def _source_data_field(source_data: Any, *keys: str) -> Any:
+    if not isinstance(source_data, dict):
+        return None
+    for key in keys:
+        value = source_data.get(key)
+        if value is not None:
+            return value
+    return None
+
+
+# 归一化单条引用为 Agent 更容易消费的结构化 reference。
+def _normalize_agentic_reference(ref: Dict[str, Any], activity_map: Dict[Any, str]) -> Dict[str, Any]:
+    ref_id = ref.get("id")
     activity_source = ref.get("activitySource") or ref.get("activity_source")
-    citation: Dict[str, Any] = {
-        "id": ref_id,
-        "display_index": display_index,
+    source_data = ref.get("sourceData", ref.get("source_data"))
+
+    reference: Dict[str, Any] = {
+        "ref_id": ref_id,
         "source_type": ref.get("type") or ref.get("source_type"),
         "title": ref.get("title"),
         "url": ref.get("url"),
         "knowledge_source_name": activity_map.get(activity_source),
         "activity_source": activity_source,
         "reranker_score": ref.get("rerankerScore", ref.get("reranker_score")),
+        "content": _extract_source_content(source_data),
+        "document_id": _source_data_field(source_data, "document_id", "documentId", "id") or ref.get("docKey"),
+        "chunk_id": _source_data_field(source_data, "chunk_id", "chunkId", "chunkKey"),
+        "doc_key": ref.get("docKey") or ref.get("doc_key"),
     }
 
-    source_data = ref.get("sourceData", ref.get("source_data"))
-    if source_data is not None:
-        citation["source_data"] = source_data
+    terms = _source_data_field(source_data, "terms")
+    if terms is not None:
+        reference["terms"] = terms
 
-    return {key: value for key, value in citation.items() if value is not None}
+    return {key: value for key, value in reference.items() if value is not None}
+
+
+# 默认只返回答案实际引用的证据；没有引用标记时退回返回全部证据。
+def _select_referenced_sources(
+    references: List[Dict[str, Any]],
+    reference_ids: List[str],
+) -> List[Dict[str, Any]]:
+    if not reference_ids:
+        return references
+
+    by_id = {str(reference.get("ref_id")): reference for reference in references}
+    return [by_id[ref_id] for ref_id in reference_ids if ref_id in by_id]
 
 
 # 构造面向 Agent 的 Knowledge Base Retrieval 返回，不混入展示层格式。
 def _build_agentic_response(
     raw_response: Dict[str, Any],
     *,
+    metadata: Optional[Dict[str, Any]] = None,
     diagnostics: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     answer_text = _extract_agentic_answer_text(raw_response)
     activities = _list_or_empty(raw_response.get("activity"))
-    references = _list_or_empty(raw_response.get("references"))
-    metadata = raw_response.get("metadata")
+    raw_references = _list_or_empty(raw_response.get("references"))
+    raw_metadata = raw_response.get("metadata")
     activity_map = _build_activity_source_map(activities)
+    reference_ids = _extract_reference_ids(answer_text)
+    normalized_references = [
+        _normalize_agentic_reference(ref, activity_map)
+        for ref in raw_references
+        if isinstance(ref, dict)
+    ]
 
     response: Dict[str, Any] = {
         "answer": {
             "text": answer_text,
-            "citation_markers": _extract_citation_markers(answer_text),
+            "citation_markers": [f"ref_id:{ref_id}" for ref_id in reference_ids],
         },
-        "citations": [
-            _normalize_agentic_citation(ref, activity_map)
-            for ref in references
-            if isinstance(ref, dict)
-        ],
-        "response": _list_or_empty(raw_response.get("response")),
-        "references": references,
-        "activity": activities,
-        "metadata": metadata if isinstance(metadata, dict) else {},
+        "references": _select_referenced_sources(normalized_references, reference_ids),
+        "metadata": {
+            **(raw_metadata if isinstance(raw_metadata, dict) else {}),
+            **(metadata or {}),
+            "referenced_count": len(reference_ids),
+            "total_reference_count": len(normalized_references),
+        },
     }
 
     if diagnostics:
@@ -1111,6 +1164,7 @@ async def agentic_retrieval(
         knowledge_base_name=knowledge_base_name,
     )
 
+    started_at = time.perf_counter()
     try:
         async with client:
             retrieve_kwargs: Dict[str, Any] = {
@@ -1124,13 +1178,23 @@ async def agentic_retrieval(
                 timeout=timeout_budget,
             )
         raw_data = _to_plain_data(result)
+        elapsed_ms = round((time.perf_counter() - started_at) * 1000)
+        response_metadata = {
+            "knowledge_base_name": knowledge_base_name,
+            "output_mode": output_mode,
+            "reasoning_effort": reasoning_effort,
+            "elapsed_ms": elapsed_ms,
+        }
         diagnostics = None
         if include_diagnostics:
             diagnostics = {
                 "request": request.as_dict(),
                 "timeout_budget_seconds": timeout_budget,
+                "response": _list_or_empty(raw_data.get("response")),
+                "raw_references": _list_or_empty(raw_data.get("references")),
+                "activity": _list_or_empty(raw_data.get("activity")),
             }
-        return _build_agentic_response(raw_data, diagnostics=diagnostics)
+        return _build_agentic_response(raw_data, metadata=response_metadata, diagnostics=diagnostics)
     except HttpResponseError as exc:
         raise RuntimeError(f"Agentic retrieval failed ({_http_status_code(exc)}): {exc.message}") from exc
     except asyncio.TimeoutError as exc:

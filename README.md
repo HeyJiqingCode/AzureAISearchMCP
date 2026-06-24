@@ -318,9 +318,11 @@ Frequently used arguments:
 Response is structured for agent consumption:
 
 - `answer`: object containing `text` and `citation_markers`. The answer text keeps Azure AI Search citation markers such as `[ref_id:0]`.
-- `citations`: normalized citation objects with fields such as `id`, `display_index`, `source_type`, `title`, `url`, `knowledge_source_name`, `activity_source`, and `reranker_score`.
-- `response`, `references`, `activity`, `metadata`: SDK response fields converted to plain JSON.
-- `diagnostics`: included only when `include_diagnostics=true`.
+- `references`: normalized evidence objects referenced by `answer.text`, with fields such as `ref_id`, `source_type`, `title`, `url`, `content`, `document_id`, `chunk_id`, `doc_key`, `knowledge_source_name`, `activity_source`, and `reranker_score`.
+- `metadata`: request and retrieval metadata such as `knowledge_base_name`, `output_mode`, `reasoning_effort`, `elapsed_ms`, `referenced_count`, and `total_reference_count`.
+- `diagnostics`: included only when `include_diagnostics=true`; contains the normalized SDK request, timeout budget, raw response, raw references, and activity details.
+
+To receive source chunks in `references[].content`, set `includeReferenceSourceData=true` in the relevant `knowledge_source_configs` entry. Azure AI Search only returns `sourceData` when the knowledge source is configured to include it.
 
 ### Basic Example
 
